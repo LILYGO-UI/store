@@ -1,0 +1,37 @@
+#ifndef LILYGO_UI_STORE_INSTALLED_VIEW_HPP
+#define LILYGO_UI_STORE_INSTALLED_VIEW_HPP
+
+#include "pages/installed/installed_view_model.hpp"
+
+#include <lvgl.h>
+
+struct InstalledViewCallbacks {
+  lv_event_cb_t select_app;
+  lv_event_cb_t primary_action;
+  lv_event_cb_t remove;
+  void (*layout_changed)();
+};
+
+class InstalledView {
+public:
+  InstalledView(InstalledViewModel &view_model,
+                InstalledViewCallbacks callbacks) noexcept;
+
+  lv_obj_t *create(lv_obj_t *parent);
+  void destroy() noexcept;
+
+private:
+  static void revision_changed(lv_observer_t *observer, lv_subject_t *subject);
+  static void refresh_async(void *user_data);
+
+  void request_refresh() noexcept;
+  void rebuild();
+
+  InstalledViewModel &view_model_;
+  InstalledViewCallbacks callbacks_;
+  lv_obj_t *surface_ = nullptr;
+  bool suppress_refresh_ = false;
+  bool refresh_pending_ = false;
+};
+
+#endif

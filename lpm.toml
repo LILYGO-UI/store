@@ -1,0 +1,51 @@
+schema_version = 1
+
+[project]
+package = "lilygo-ui-store"
+version = "0.1.0"
+app_id = "cc.lilygo.ui.Store"
+title = "Store"
+summary = "Browse, install, and manage LILYGO UI apps."
+description = "An app store for LILYGO UI devices that allows you to browse apps from the registry, view installed apps, and handle app installation, updates, and uninstallation."
+license = "LicenseRef-proprietary"
+source_repo = "https://github.com/LILYGO-UI/store"
+homepage = "https://github.com/LILYGO-UI/store"
+categories = ["System", "Utilities"]
+
+[[project.authors]]
+name = "LILYGO"
+github = "LILYGO"
+
+[project.assets]
+icon = "assets/app-icon.png"
+
+[[project.assets.screenshots]]
+path = "assets/previews/store-portrait.png"
+caption = "Browse and manage LILYGO UI applications."
+
+[[project.permissions]]
+id = "network"
+reason = "Read the application directory and download the software packages to be installed."
+
+[[project.permissions]]
+id = "filesystem"
+access = "read-write"
+scope = "app-data"
+reason = "Cache the application catalog, downloaded icons, and screenshots."
+
+[project.compatibility]
+architectures = ["arm64"]
+min_appkit_version = "0.1.0"
+
+[project.launcher]
+order = 20
+
+[build]
+host_preset = "host-simulator"
+cross_preset = "cm0-cross"
+package_dir = "dist"
+
+[deploy]
+host = "raspberrypi.local"
+user = "pi"
+port = 22
