@@ -2,7 +2,7 @@ schema_version = 1
 
 [project]
 package = "lilygo-ui-store"
-version = "0.1.0"
+version = "0.1.1"
 app_id = "cc.lilygo.ui.Store"
 title = "Store"
 summary = "Browse, install, and manage LILYGO UI apps."
@@ -25,7 +25,7 @@ caption = "Browse and manage LILYGO UI applications."
 
 [[project.permissions]]
 id = "network"
-reason = "Read the application directory and download the software packages to be installed."
+reason = "Read the application directory, download applications, and fetch dependencies from configured APT sources."
 
 [[project.permissions]]
 id = "filesystem"

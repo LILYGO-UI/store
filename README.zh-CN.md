@@ -27,22 +27,39 @@ https://lilygo-ui.github.io/packages/v1/root.json
 声明的 SHA-256，再读取该 snapshot 中每个应用的详情。根文档、索引和详情的协议版本、
 snapshot、应用身份与摘要字段必须一致；任一检查失败时不会采用部分目录。
 
-Store 会按 Registry 根地址缓存已验证的 `root.json`。后续启动时，缓存快照与线上快照会
-并行加载：缓存结果先完成时立即显示，线上结果成功后再更新页面并原子替换缓存；如果线上
-结果先完成，较旧的缓存结果不会覆盖页面。缓存不存在或损坏时直接忽略，不影响线上加载。
+Store 会按 Registry 根地址缓存已验证的 `root.json`、索引和应用详情文档。后续启动时，
+缓存快照完全从本地文件加载，同时并行刷新线上快照，因此页面无需等待网络即可显示本地
+目录；线上结果成功后再更新页面并原子发布新缓存。如果线上结果先完成，较旧的缓存结果
+不会覆盖页面。缓存不存在或损坏时直接忽略，不影响线上加载。
 
 安装和更新会从详情中的中央 GitHub Release 下载 `.deb`；官方内容寻址资产优先通过
 GitHub API 解析到资产下载端点，并在 API 不可用时回退 Registry 中的原始 URL。下载完成后
-严格核对文件大小和 SHA-256，再通过 `pkexec dpkg --install` 安装，并使用 `dpkg-query`
-回读目标版本。卸载通过 `pkexec dpkg --remove` 完成，商店禁止卸载自身。目录刷新和包操作
+严格核对文件大小和 SHA-256，再通过 `pkexec` 调用随包安装的
+`lilygo-ui-store-package-install` helper。helper 复制并重新校验包的 SHA-256 与 Debian
+身份，刷新 APT 索引，通过 `apt-get install` 安装本地包并自动补齐所需依赖，再由
+Store 使用 `dpkg-query` 回读目标版本。卸载通过 `pkexec dpkg --remove` 完成，商店禁止卸载自身。目录刷新和包操作
 均在工作线程执行，LVGL 线程只接收结果和更新页面。
+
+依赖由 APT 2.2 或更新版本从设备已配置的 Debian/Raspberry Pi 软件源解析，必须在包的 `Depends` 或
+`Pre-Depends` 中声明，且软件源提供所需版本，或设备已经安装兼容版本。
+GitHub `packages` 应用目录不是 APT 源；Store 不会自动添加软件源，也不会将目录里的
+其他应用作为依赖下载。安装无需终端交互，保留已有配置文件，并拒绝需要移除软件包的
+事务。索引刷新或依赖解析失败会显示错误，不会回退到 `dpkg --install`。
 
 代码按边界组织：`registry` 处理传输、JSON 和 snapshot 校验，`system` 封装进程及 Debian
 包管理，`service` 将协议数据映射为 Store 模型，`pages/<feature>` 包含 View 与 ViewModel。
 核心代码不依赖 Launcher 或其他应用仓库。
 
-进一步的工程约定见 [架构说明](docs/architecture.md) 和
-[UI 设计规范](docs/ui-design.md)。
+`lilygo-ui-launcher` 被视为受保护的系统组件：Store 不允许卸载它，也不提供首次安装。
+当已安装的 Launcher 有更新时，Store 仍按 Registry 元数据下载并校验软件包，安装
+helper 先通过 `apt-get satisfy` 补齐新版的必需依赖、检查 `Conflicts`/`Breaks`，并保持当前 Launcher 版本，再交给
+`/usr/lib/lilygo-ui-launcher/lilygo-ui-launcher-update`。helper 将软件包复制到 root
+管理的目录并启动独立更新服务；交接成功后 Store 退出，使升级脱离 Launcher service
+cgroup 完成，并由更新服务重新启动 Launcher。尚未包含该 helper 的旧版本需要由系统
+镜像或管理员先完成一次基线升级。
+
+进一步的工程约定见 [项目总览](docs/00-overview.md)、
+[UI 开发规范](docs/01-user-interface.md) 和 [架构说明](docs/02-architecture.md)。
 
 应用 ID、名称、版本、说明、许可证、图标、兼容性和 Launcher 排序等项目元数据统一维护在
 `lpm.toml`。CMake 配置时通过 LPM 读取并校验这些字段，再生成 Launcher、Desktop、

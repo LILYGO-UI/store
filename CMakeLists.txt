@@ -21,6 +21,11 @@ set_target_properties(StorePNG::StorePNG PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${STORE_PNG_INCLUDE_DIR}")
 mark_as_advanced(STORE_PNG_INCLUDE_DIR STORE_PNG_LIBRARY)
 
+set(LILYGO_UI_STORE_PACKAGE_INSTALL_HELPER
+    "${CMAKE_INSTALL_FULL_LIBEXECDIR}/${LILYGO_UI_PACKAGE_NAME}/${LILYGO_UI_PACKAGE_NAME}-package-install")
+_lilygo_ui_escape_c(LILYGO_UI_STORE_PACKAGE_INSTALL_HELPER_C
+    "${LILYGO_UI_STORE_PACKAGE_INSTALL_HELPER}")
+
 configure_file(
     cmake/app_identity.h.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/app_identity.h
@@ -36,6 +41,7 @@ add_library(lilygo_ui_store_core STATIC
     src/registry/root_cache.cpp
     src/registry/sha256.cpp
     src/service/store_service.cpp
+    src/system/apt_installer.cpp
     src/system/package_manager.cpp
     src/system/process.cpp)
 target_include_directories(lilygo_ui_store_core PUBLIC
@@ -72,6 +78,18 @@ target_link_libraries(lilygo_ui_store PRIVATE lilygo_ui_store_ui)
 set_target_properties(lilygo_ui_store PROPERTIES
     OUTPUT_NAME "${LILYGO_UI_EXECUTABLE_NAME}")
 
+# Keep the privileged installer independent of image and UI libraries.
+add_executable(store-package-install
+    src/system/package_install_main.cpp
+    src/system/apt_installer.cpp
+    src/system/process.cpp
+    src/registry/sha256.cpp)
+target_compile_options(store-package-install PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_features(store-package-install PRIVATE cxx_std_17)
+target_include_directories(store-package-install PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+set_target_properties(store-package-install PROPERTIES
+    OUTPUT_NAME "${LILYGO_UI_PACKAGE_NAME}-package-install")
+
 configure_file(data/launcher.json.in
     ${CMAKE_CURRENT_BINARY_DIR}/${LILYGO_UI_APP_ID}.json @ONLY)
 configure_file(data/application.desktop.in
@@ -81,6 +99,9 @@ configure_file(data/application.metainfo.xml.in
 
 install(TARGETS lilygo_ui_store
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    COMPONENT app)
+install(TARGETS store-package-install
+    RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/${LILYGO_UI_PACKAGE_NAME}
     COMPONENT app)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${LILYGO_UI_APP_ID}.json
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/launcher/apps
@@ -105,6 +126,17 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
     target_link_libraries(store-core-tests PRIVATE
         lilygo_ui_store_core)
     add_test(NAME store-core COMMAND store-core-tests)
+
+    add_executable(store-apt-tests tests/test_apt_installer.cpp)
+    target_compile_options(store-apt-tests PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    target_link_libraries(store-apt-tests PRIVATE lilygo_ui_store_core)
+    add_test(NAME store-apt COMMAND store-apt-tests)
+
+    add_executable(store-apt-integration-tests EXCLUDE_FROM_ALL
+        tests/test_apt_integration.cpp)
+    target_compile_options(store-apt-integration-tests PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    target_link_libraries(store-apt-integration-tests PRIVATE lilygo_ui_store_core)
 
     add_executable(store-view-model-tests tests/test_view_model.cpp)
     target_compile_options(store-view-model-tests PRIVATE
@@ -170,7 +202,7 @@ set(CPACK_COMPONENTS_ALL app)
 set(CPACK_DEBIAN_APP_PACKAGE_NAME "${LILYGO_UI_PACKAGE_NAME}")
 set(CPACK_DEBIAN_APP_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_APP_PACKAGE_DEPENDS
-    "libc6, libstdc++6, libdrm2, libfreetype6, libpng16-16, curl, pkexec, lilygo-ui-appkit-dev (>= ${LILYGO_UI_MIN_APPKIT_VERSION})")
+    "libc6, libstdc++6, libdrm2, libfreetype6, libpng16-16, curl, pkexec, apt (>= 2.2), lilygo-ui-appkit-dev (>= ${LILYGO_UI_MIN_APPKIT_VERSION})")
 set(CPACK_DEBIAN_APP_PACKAGE_SECTION "utils")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
 if(CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")

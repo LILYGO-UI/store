@@ -12,6 +12,7 @@ applications, and installing, updating, or removing packages.
 - Browse all applications and filter by Official or Community source
 - View application author, version, size, and description
 - Install applications and update those with newer versions
+- Automatically install Debian dependencies from the device's configured APT sources
 - View and remove locally installed applications
 - Load immutable application catalog snapshots from LILYGO Registry Pages
 - Verify Debian package size and SHA-256 before installation
@@ -33,22 +34,49 @@ snapshot. The protocol version, snapshot, application identity, and digest field
 must agree across the root document, index, and details. If any validation fails,
 the partial catalog is discarded.
 
-The Store caches verified `root.json` data by registry root URL. On subsequent
-starts, the cached and remote snapshots load concurrently. If the cached result
-finishes first, it is displayed immediately; a successful remote result then
-refreshes the page and atomically replaces the cache. If the remote result
-finishes first, an older cached result cannot overwrite it. Missing or corrupt
-cache data is ignored without affecting remote loading.
+The Store caches the verified `root.json`, index, and application detail
+documents by registry root URL. On subsequent starts, the cached snapshot is
+loaded entirely from local files while the remote snapshot refreshes
+concurrently. The local result can therefore be displayed without waiting for
+the network; a successful remote result then refreshes the page and atomically
+publishes a new cache. If the remote result finishes first, an older cached
+result cannot overwrite it. Missing or corrupt cache data is ignored without
+affecting remote loading.
 
 Install and update operations download the `.deb` referenced by the application
 details from the central GitHub Release. For official content-addressed assets,
 the Store first resolves the asset download endpoint through the GitHub API and
 falls back to the original registry URL if the API is unavailable. After the
-download completes, the Store strictly verifies the file size and SHA-256, runs
-`pkexec dpkg --install`, and reads the installed target version back with
-`dpkg-query`. Removal uses `pkexec dpkg --remove`, and the Store prevents users
+download completes, the Store strictly verifies the file size and SHA-256 and
+invokes its packaged `lilygo-ui-store-package-install` helper through `pkexec`.
+The helper stages a private copy, rechecks its digest and Debian identity,
+refreshes APT indexes, and uses `apt-get install` to install the local package
+with its required dependencies. Store reads the installed target version back
+with `dpkg-query`. Removal uses `pkexec dpkg --remove`, and the Store prevents users
 from removing the Store itself. Catalog refreshes and package operations run on
 worker threads; the LVGL thread only receives results and updates the interface.
+
+Dependencies are resolved by APT 2.2 or newer from the device's existing Debian/Raspberry Pi
+sources. They must be declared in the package's `Depends` or `Pre-Depends` fields
+and available in those sources (or already installed at a suitable version).
+The GitHub `packages` application catalog is not an APT source; Store does not
+add repositories or download other catalog applications as dependencies.
+Installations are noninteractive, preserve existing configuration files, and
+refuse transactions that remove packages. Index refresh or dependency resolution
+failures are reported without falling back to `dpkg --install`.
+
+`lilygo-ui-launcher` is handled as a protected system component. Store never
+offers to remove it and does not install it as a new package. When an installed
+Launcher has an update, Store verifies the Registry artifact normally. Its install
+helper first uses `apt-get satisfy` to install the new package's required
+dependencies and check `Conflicts`/`Breaks` while retaining the current Launcher
+version, then hands the package
+to `/usr/lib/lilygo-ui-launcher/lilygo-ui-launcher-update`. The Launcher helper
+copies the artifact into root-owned storage and starts the independent update
+service; after that handoff succeeds, Store exits so Launcher can be upgraded
+outside the Launcher service cgroup and restarted. Devices whose Launcher does
+not yet contain this helper require one administrator- or image-managed baseline
+upgrade before Store-mediated updates are available.
 
 The source is organized around clear boundaries: `registry` handles transport,
 JSON, and snapshot validation; `system` wraps processes and Debian package
@@ -56,8 +84,8 @@ management; `service` maps protocol data into Store models; and `pages/<feature>
 contains each View and ViewModel. Core code does not depend on the Launcher or
 another application repository.
 
-For more engineering details, see the [architecture notes](docs/architecture.md)
-and [UI design guidelines](docs/ui-design.md).
+For more engineering details, see the [project overview](docs/00-overview.md),
+[UI guidelines](docs/01-user-interface.md), and [architecture notes](docs/02-architecture.md).
 
 Project metadata such as the application ID, name, version, description, license,
 icons, compatibility, and Launcher ordering is maintained exclusively in
