@@ -257,7 +257,8 @@ void test_launcher_dependency_handoff(AptFixture &fixture)
     const std::string launcher     = "lilygo-ui-launcher";
     const std::string prerequisite = "lilygo-ui-store-test-launcher-prerequisite";
     const std::string runtime      = "lilygo-ui-store-test-launcher-runtime";
-    const auto installed           = fixture.package(launcher, "1.0");
+    const auto installed =
+        fixture.package(launcher, "1.0", "Provides: cm0-launcher (= 1.0)\nConflicts: cm0-launcher\n");
     fixture.command({"/usr/bin/dpkg", "--install", installed.path.string()});
     fixture.command({"/usr/bin/apt-mark", "hold", launcher});
     fixture.package(launcher, "9.0", {}, true);
@@ -285,8 +286,10 @@ void test_launcher_dependency_handoff(AptFixture &fixture)
                    runtime + " >> '" + log.string() + "'\n");
     fs::permissions(queue_helper, fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec |
                                       fs::perms::others_read | fs::perms::others_exec);
-    const auto update = fixture.package(
-        launcher, "2.0", "Pre-Depends: " + prerequisite + " (>= 2.0)\nDepends: " + runtime + " (>= 1.0)\n");
+    const auto update =
+        fixture.package(launcher, "2.0",
+                        "Provides: cm0-launcher (= 2.0)\nConflicts: cm0-launcher\nPre-Depends: " + prerequisite +
+                            " (>= 2.0)\nDepends: " + runtime + " (>= 1.0)\n");
     fixture.install_successfully(update);
     fixture.require_installed(launcher, "1.0");
     fixture.require_installed(prerequisite, "2.0");

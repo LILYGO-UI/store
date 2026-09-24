@@ -69,8 +69,11 @@ failures are reported without falling back to `dpkg --install`.
 offers to remove it and does not install it as a new package. When an installed
 Launcher has an update, Store verifies the Registry artifact normally. Its install
 helper first uses `apt-get satisfy` to install the new package's required
-dependencies and check `Conflicts`/`Breaks` while retaining the current Launcher
-version, then hands the package
+dependencies and check its `Conflicts`/`Breaks` with removals disabled. Migration
+aliases that the target package itself provides are omitted from that synthetic
+check, and the installed Launcher version is not added as an APT constraint
+because image and locally deployed versions may not exist in configured sources.
+It then hands the package
 to `/usr/lib/lilygo-ui-launcher/lilygo-ui-launcher-update`. The Launcher helper
 copies the artifact into root-owned storage and starts the independent update
 service; after that handoff succeeds, Store exits so Launcher can be upgraded

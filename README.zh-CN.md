@@ -52,7 +52,9 @@ GitHub `packages` 应用目录不是 APT 源；Store 不会自动添加软件源
 
 `lilygo-ui-launcher` 被视为受保护的系统组件：Store 不允许卸载它，也不提供首次安装。
 当已安装的 Launcher 有更新时，Store 仍按 Registry 元数据下载并校验软件包，安装
-helper 先通过 `apt-get satisfy` 补齐新版的必需依赖、检查 `Conflicts`/`Breaks`，并保持当前 Launcher 版本，再交给
+helper 先通过 `apt-get satisfy` 补齐新版的必需依赖，并在禁止删除软件包的前提下检查
+`Conflicts`/`Breaks`；目标包自己提供的迁移别名会从这个合成检查中排除，当前 Launcher
+版本也不会作为 APT 约束（因为镜像或本地部署的版本可能不在已配置的软件源中），再交给
 `/usr/lib/lilygo-ui-launcher/lilygo-ui-launcher-update`。helper 将软件包复制到 root
 管理的目录并启动独立更新服务；交接成功后 Store 退出，使升级脱离 Launcher service
 cgroup 完成，并由更新服务重新启动 Launcher。尚未包含该 helper 的旧版本需要由系统

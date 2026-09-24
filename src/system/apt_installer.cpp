@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -151,6 +152,102 @@ std::string trimmed(std::string value)
     return value;
 }
 
+std::string trim_whitespace(std::string value)
+{
+    const auto is_space = [](unsigned char character) { return std::isspace(character) != 0; };
+    auto begin          = std::find_if_not(value.begin(), value.end(), is_space);
+    auto end            = std::find_if_not(value.rbegin(), value.rend(), is_space).base();
+    if (begin >= end) return {};
+    return std::string(begin, end);
+}
+
+std::vector<std::string> split_relation(const std::string_view value, const char separator)
+{
+    std::vector<std::string> parts;
+    std::size_t start        = 0;
+    unsigned int parentheses = 0;
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        if (value[index] == '(') {
+            ++parentheses;
+        } else if (value[index] == ')' && parentheses != 0) {
+            --parentheses;
+        } else if (value[index] == separator && parentheses == 0) {
+            parts.push_back(trim_whitespace(std::string(value.substr(start, index - start))));
+            start = index + 1;
+        }
+    }
+    parts.push_back(trim_whitespace(std::string(value.substr(start))));
+    return parts;
+}
+
+std::string relation_package_name(const std::string_view relation)
+{
+    std::size_t begin = 0;
+    while (begin < relation.size() && std::isspace(static_cast<unsigned char>(relation[begin])) != 0) ++begin;
+    std::size_t end = begin;
+    while (end < relation.size()) {
+        const auto character = static_cast<unsigned char>(relation[end]);
+        if ((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+            (character >= '0' && character <= '9') || character == '+' || character == '-' || character == '.' ||
+            character == ':') {
+            ++end;
+            continue;
+        }
+        break;
+    }
+    if (end == begin) return {};
+    const auto name      = relation.substr(begin, end - begin);
+    const auto qualifier = name.find(':');
+    return std::string(name.substr(0, qualifier));
+}
+
+bool contains_name(const std::vector<std::string> &names, const std::string_view name)
+{
+    return std::find(names.begin(), names.end(), name) != names.end();
+}
+
+std::vector<std::string> package_names(const std::string_view package, const std::string_view provides)
+{
+    std::vector<std::string> names{std::string(package)};
+    for (const auto &provided : split_relation(provides, ',')) {
+        const auto name = relation_package_name(provided);
+        if (!name.empty() && !contains_name(names, name)) names.push_back(name);
+    }
+    return names;
+}
+
+std::string without_self_relations(const std::string &relation, const std::vector<std::string> &self_names)
+{
+    std::vector<std::string> clauses;
+    bool changed = false;
+    for (const auto &clause : split_relation(relation, ',')) {
+        if (clause.empty()) continue;
+        std::vector<std::string> alternatives;
+        for (const auto &alternative : split_relation(clause, '|')) {
+            if (alternative.empty()) continue;
+            if (contains_name(self_names, relation_package_name(alternative))) {
+                changed = true;
+            } else {
+                alternatives.push_back(alternative);
+            }
+        }
+        if (!alternatives.empty()) {
+            std::string rebuilt = alternatives.front();
+            for (std::size_t index = 1; index < alternatives.size(); ++index) {
+                rebuilt += " | " + alternatives[index];
+            }
+            clauses.push_back(std::move(rebuilt));
+        }
+    }
+    if (!changed) return relation;
+    std::string filtered;
+    for (std::size_t index = 0; index < clauses.size(); ++index) {
+        if (index != 0) filtered += ", ";
+        filtered += clauses[index];
+    }
+    return filtered;
+}
+
 std::string command_error(const ProcessResult &result, const char *context)
 {
     std::string error = context;
@@ -241,21 +338,32 @@ AptInstallResult install_debian_package(ProcessRunner &runner, const AptInstallR
         if (!succeeded(upgrade))
             return {command_error(upgrade, "Launcher target must be newer than the installed version")};
 
-        // Keep Launcher running at its current version until its update helper
-        // exits the session. APT parses the dependency relationships, including
-        // alternatives.
-        operation.push_back(request.package + " (= " + installed_version + ")");
+        const auto provides = runner.run({"/usr/bin/dpkg-deb", "--field", staged.path().string(), "Provides"});
+        if (!succeeded(provides)) return {command_error(provides, "Unable to read Launcher package Provides")};
+        const auto self_names = package_names(request.package, provides.output);
+
+        // Resolve only the target package's dependency relationships before
+        // handing the package to Launcher. The installed Launcher may have
+        // come from an image or a local deployment and therefore may not be
+        // present in any configured APT source. Passing its exact version to
+        // `apt-get satisfy` makes APT reject an otherwise valid update with
+        // "not installable" even when that version is already installed.
         for (const auto *field : {"Pre-Depends", "Depends"}) {
             const auto dependencies = runner.run({"/usr/bin/dpkg-deb", "--field", staged.path().string(), field});
             if (!succeeded(dependencies)) return {command_error(dependencies, "Unable to read Launcher dependencies")};
             if (!trimmed(dependencies.output).empty()) operation.push_back(dependencies.output);
         }
+        // Migration packages commonly declare Conflicts on a legacy alias
+        // that they also Provide. APT would otherwise interpret that alias as
+        // a request to remove the currently running Launcher. Keep unrelated
+        // conflicts and breaks so --no-remove still rejects unsafe updates.
         // Reject incompatible installed packages before the deferred dpkg worker
         // runs. Breaks must also be resolved without deconfiguring live packages.
         for (const auto *field : {"Conflicts", "Breaks"}) {
             const auto conflicts = runner.run({"/usr/bin/dpkg-deb", "--field", staged.path().string(), field});
             if (!succeeded(conflicts)) return {command_error(conflicts, "Unable to read Launcher package conflicts")};
-            if (!trimmed(conflicts.output).empty()) operation.push_back("Conflicts: " + conflicts.output);
+            const auto filtered = without_self_relations(conflicts.output, self_names);
+            if (!trimmed(filtered).empty()) operation.push_back("Conflicts: " + filtered);
         }
     } else {
         operation.push_back(staged.path().string());

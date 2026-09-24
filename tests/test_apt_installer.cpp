@@ -116,6 +116,7 @@ public:
             assert(arguments.at(2) == staged.string());
             if (arguments.back() == "Pre-Depends") return pre_depends;
             if (arguments.back() == "Depends") return depends;
+            if (arguments.back() == "Provides") return provides;
             if (arguments.back() == "Conflicts") return conflicts;
             assert(arguments.back() == "Breaks");
             return breaks;
@@ -180,6 +181,7 @@ public:
     ProcessResult upgrade{0, {}, {}};
     ProcessResult pre_depends{0, {}, {}};
     ProcessResult depends{0, {}, {}};
+    ProcessResult provides{0, {}, {}};
     ProcessResult conflicts{0, {}, {}};
     ProcessResult breaks{0, {}, {}};
     ProcessResult update{0, {}, {}};
@@ -321,7 +323,7 @@ void test_dependency_failure_is_reported_without_handoff()
     }
 }
 
-void test_launcher_dependencies_are_delegated_to_apt_unchanged()
+void test_launcher_dependencies_are_delegated_without_self_constraint()
 {
     PackageFixture fixture;
     auto request    = fixture.request("lilygo-ui-launcher");
@@ -332,6 +334,7 @@ void test_launcher_dependencies_are_delegated_to_apt_unchanged()
     runner.depends.output =
         "libexample:any (>= 2.0), virtual-provider | fallback-provider,\n"
         " architecture-provider:arm64 (<< 3.0)\n";
+    runner.provides.output  = "cm0-launcher (= 1:2.0.0-1)\n";
     runner.conflicts.output = "conflicting-provider (<< 3.0), other-conflict\n";
     runner.breaks.output    = "obsolete-provider (<= 2.0)\n";
     const auto result       = install_debian_package(runner, request);
@@ -346,9 +349,8 @@ void test_launcher_dependencies_are_delegated_to_apt_unchanged()
     const auto separator = std::find(satisfy.begin(), satisfy.end(), "--");
     assert(separator != satisfy.end());
     assert((std::vector<std::string>(separator + 1, satisfy.end()) ==
-            std::vector<std::string>{"lilygo-ui-launcher (= 1:1.0.0-2+device1)", runner.pre_depends.output,
-                                     runner.depends.output, "Conflicts: " + runner.conflicts.output,
-                                     "Conflicts: " + runner.breaks.output}));
+            std::vector<std::string>{runner.pre_depends.output, runner.depends.output,
+                                     "Conflicts: " + runner.conflicts.output, "Conflicts: " + runner.breaks.output}));
     const auto &handoff = runner.find(kLauncherHelper);
     assert((handoff == std::vector<std::string>{kLauncherHelper, "queue", runner.staged.string(), request.version,
                                                 request.sha256}));
@@ -357,7 +359,27 @@ void test_launcher_dependencies_are_delegated_to_apt_unchanged()
     runner.check_cleaned();
 }
 
-void test_launcher_without_dependencies_keeps_installed_version()
+void test_launcher_filters_self_migration_relations()
+{
+    PackageFixture fixture;
+    const auto request = fixture.request("lilygo-ui-launcher");
+    FakeRunner runner(request);
+    runner.provides.output  = "cm0-launcher (= 2.0.0), legacy-launcher\n";
+    runner.conflicts.output = "cm0-launcher, installed-provider (<< 3.0), cm0-launcher:any\n";
+    runner.breaks.output    = "cm0-launcher | obsolete-provider (<= 2.0)\n";
+
+    const auto result = install_debian_package(runner, request);
+    assert(result);
+    const auto &satisfy  = runner.find("/usr/bin/apt-get", "satisfy");
+    const auto separator = std::find(satisfy.begin(), satisfy.end(), "--");
+    assert(separator != satisfy.end());
+    assert(
+        (std::vector<std::string>(separator + 1, satisfy.end()) ==
+         std::vector<std::string>{"Conflicts: installed-provider (<< 3.0)", "Conflicts: obsolete-provider (<= 2.0)"}));
+    runner.check_cleaned();
+}
+
+void test_launcher_without_dependencies_does_not_request_self()
 {
     PackageFixture fixture;
     const auto request = fixture.request("lilygo-ui-launcher");
@@ -368,8 +390,8 @@ void test_launcher_without_dependencies_keeps_installed_version()
     assert(result);
     assert(result.launcher_update_queued);
     const auto &satisfy = runner.find("/usr/bin/apt-get", "satisfy");
-    assert(contains_pair(satisfy, "--", "lilygo-ui-launcher (= 1.0.0)"));
-    assert(satisfy.back() == "lilygo-ui-launcher (= 1.0.0)");
+    assert(!contains_pair(satisfy, "--", "lilygo-ui-launcher (= 1.0.0)"));
+    assert(satisfy.back() == "--");
     runner.check_cleaned();
 }
 
@@ -389,7 +411,7 @@ void test_launcher_requires_fully_installed_current_version()
     }
 }
 
-void test_held_launcher_can_update_with_current_version_constraint()
+void test_held_launcher_can_update_without_current_version_constraint()
 {
     PackageFixture fixture;
     const auto request = fixture.request("lilygo-ui-launcher");
@@ -399,7 +421,7 @@ void test_held_launcher_can_update_with_current_version_constraint()
     assert(result);
     assert(result.launcher_update_queued);
     const auto &satisfy = runner.find("/usr/bin/apt-get", "satisfy");
-    assert(contains_pair(satisfy, "--", "lilygo-ui-launcher (= 1.0.0)"));
+    assert(!contains_pair(satisfy, "--", "lilygo-ui-launcher (= 1.0.0)"));
     assert(!contains(satisfy, "--allow-change-held-packages"));
     runner.check_cleaned();
 }
@@ -409,10 +431,10 @@ void test_subprocess_failures_stop_at_failed_command()
     PackageFixture fixture;
     const auto request                                     = fixture.request("lilygo-ui-launcher");
     const std::vector<ProcessResult FakeRunner::*> results = {
-        &FakeRunner::metadata,  &FakeRunner::architecture, &FakeRunner::installed_launcher,
-        &FakeRunner::upgrade,   &FakeRunner::pre_depends,  &FakeRunner::depends,
-        &FakeRunner::conflicts, &FakeRunner::breaks,       &FakeRunner::update,
-        &FakeRunner::operation, &FakeRunner::handoff};
+        &FakeRunner::metadata, &FakeRunner::architecture, &FakeRunner::installed_launcher,
+        &FakeRunner::upgrade,  &FakeRunner::provides,     &FakeRunner::pre_depends,
+        &FakeRunner::depends,  &FakeRunner::conflicts,    &FakeRunner::breaks,
+        &FakeRunner::update,   &FakeRunner::operation,    &FakeRunner::handoff};
     for (std::size_t index = 0; index < results.size(); ++index) {
         for (const auto output_limit_exceeded : {false, true}) {
             FakeRunner runner(request);
@@ -495,10 +517,11 @@ int main()
     test_metadata_and_architecture_rejections();
     test_source_refresh_failure_prevents_install();
     test_dependency_failure_is_reported_without_handoff();
-    test_launcher_dependencies_are_delegated_to_apt_unchanged();
-    test_launcher_without_dependencies_keeps_installed_version();
+    test_launcher_dependencies_are_delegated_without_self_constraint();
+    test_launcher_filters_self_migration_relations();
+    test_launcher_without_dependencies_does_not_request_self();
     test_launcher_requires_fully_installed_current_version();
-    test_held_launcher_can_update_with_current_version_constraint();
+    test_held_launcher_can_update_without_current_version_constraint();
     test_subprocess_failures_stop_at_failed_command();
     test_launcher_conflicts_prevent_handoff();
     test_launcher_rejects_non_upgrade_before_apt();

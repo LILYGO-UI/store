@@ -79,8 +79,9 @@ APT 以非交互模式运行、保留已有配置，并禁止移除包；失败�
 
 Launcher 是受保护的系统组件，Store 不允许首次安装或卸载。更新时，Store 在完成相同
 的下载、大小和 SHA-256 校验后，Store 的提权 helper 先通过 `apt-get satisfy` 安装新版
-`Depends` 和 `Pre-Depends`、检查 `Conflicts` 和 `Breaks`，约束 Launcher 保持当前已安装
-版本，再调用 Launcher 软件包提供的 update helper。后者同步复制文件并启动独立 oneshot
+`Depends` 和 `Pre-Depends`，并在禁止删除软件包的前提下检查 `Conflicts` 和 `Breaks`。
+目标包自己提供的迁移别名会从这个合成检查中排除，当前 Launcher 版本不会作为 APT 约束，
+再调用 Launcher 软件包提供的 update helper。后者同步复制文件并启动独立 oneshot
 服务后返回；Store 随即通过 AppKit 退出回调结束前台进程，使后续 `dpkg` 和 Launcher
 重启不受原 service cgroup 停止影响。
 
