@@ -77,7 +77,14 @@ void create_installed_row(lv_obj_t *body, std::size_t index, const StoreApp &app
     auto *actions = make_flex(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_name_static(actions, "installed_action_group");
     const bool removable = is_removable_package(app.package);
-    lv_obj_set_size(actions, removable ? 116 : 64, 44);
+    // Focus outlines are drawn outside a button's bounds.  Keep enough room
+    // inside this action container so the outline of the first/last button is
+    // not clipped at the group's left/right edge while tabbing through the
+    // installed-app actions.
+    constexpr int kFocusOutlineInset = 6;
+    lv_obj_set_size(actions, removable ? 116 + 2 * kFocusOutlineInset : 64 + 2 * kFocusOutlineInset,
+                    44 + 2 * kFocusOutlineInset);
+    lv_obj_set_style_pad_all(actions, kFocusOutlineInset, 0);
     lv_obj_set_style_pad_column(actions, 8, 0);
 
     auto *primary = make_button(
@@ -133,7 +140,6 @@ namespace {
 
 void build_installed_view(lv_obj_t *content, InstalledViewModel &view_model, const InstalledViewCallbacks &callbacks)
 {
-    make_header(content, "Installed", nullptr, "Manage");
     auto *body = make_page_body(content);
     create_summary(body, view_model);
 

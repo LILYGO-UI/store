@@ -1,6 +1,5 @@
 #include "pages/catalog/catalog_view.hpp"
 
-#include "app_identity.h"
 #include "components/components.hpp"
 
 #include <cm0/typography.h>
@@ -9,6 +8,16 @@
 #include <cstdio>
 
 namespace {
+
+void create_catalog_section_heading(lv_obj_t *body)
+{
+    auto *heading = make_flex(body, LV_FLEX_FLOW_ROW);
+    lv_obj_set_name_static(heading, "catalog_section_heading");
+    lv_obj_set_size(heading, LV_PCT(100), 32);
+    lv_obj_set_flex_align(heading, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    make_label(heading, "All apps", 22, COLOR_TITLE);
+    make_label(heading, "Ready to explore", 14, COLOR_SECONDARY);
+}
 
 void create_filter(lv_obj_t *body, CatalogViewModel &view_model, lv_event_cb_t callback)
 {
@@ -47,9 +56,9 @@ void create_app_row(lv_obj_t *body, std::size_t index, const StoreApp &app, cons
 {
     auto *row = lv_button_create(body);
     lv_obj_set_name(row, app.id.c_str());
-    style_box(row, COLOR_SURFACE, 8);
-    lv_obj_set_size(row, LV_PCT(100), 88);
-    lv_obj_set_style_pad_all(row, 12, 0);
+    style_box(row, COLOR_SURFACE, 12);
+    lv_obj_set_size(row, LV_PCT(100), 104);
+    lv_obj_set_style_pad_all(row, 14, 0);
     lv_obj_set_style_pad_column(row, 12, 0);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -59,7 +68,7 @@ void create_app_row(lv_obj_t *body, std::size_t index, const StoreApp &app, cons
     make_app_icon(row, app, index, 56);
     auto *copy = make_flex(row, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_width(copy, 0);
-    lv_obj_set_height(copy, 56);
+    lv_obj_set_height(copy, 64);
     lv_obj_set_flex_grow(copy, 1);
     lv_obj_set_style_pad_row(copy, 2, 0);
 
@@ -130,14 +139,26 @@ namespace {
 
 void build_catalog_view(lv_obj_t *content, CatalogViewModel &view_model, const CatalogViewCallbacks &callbacks)
 {
-    make_header(content, LILYGO_UI_STORE_APP_NAME);
     auto *body = make_page_body(content);
     create_registry_status(body, view_model, callbacks.refresh);
     create_filter(body, view_model, callbacks.set_filter);
+    create_catalog_section_heading(body);
+
+    auto *grid = make_flex(body, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_name_static(grid, "catalog_grid");
+    lv_obj_set_size(grid, LV_PCT(100), LV_SIZE_CONTENT);
+    // LVGL's keyboard-focus style draws an outline outside a button (the
+    // default theme uses a three-pixel outline and pad). Keep that outline
+    // inside the scroll body's clip rectangle when a full-width card is
+    // focused with Tab. Without this inset, the grid clips the outer edge of
+    // the first/last card's focus frame.
+    lv_obj_set_style_pad_all(grid, 8, 0);
+    lv_obj_set_style_pad_column(grid, 12, 0);
+    lv_obj_set_style_pad_row(grid, 12, 0);
 
     for (std::size_t index = 0; index < view_model.apps().size(); ++index) {
         const auto &app = view_model.apps()[index];
-        if (view_model.is_visible(app)) create_app_row(body, index, app, callbacks);
+        if (view_model.is_visible(app)) create_app_row(grid, index, app, callbacks);
     }
 
     if (view_model.registry_state() == RegistryState::ready && view_model.apps().empty()) {

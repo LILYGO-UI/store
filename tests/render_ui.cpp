@@ -1,5 +1,4 @@
 #include "app.hpp"
-#include "app_identity.h"
 #include "domain/store_model.hpp"
 #include "pages/catalog/catalog_view.hpp"
 #include "pages/detail/detail_view.hpp"
@@ -83,6 +82,30 @@ struct RegistryFixturePaths {
     std::filesystem::path icon;
     std::filesystem::path root;
 };
+
+// Points the Store at a Registry root for the snapshot index, with a fresh cache.
+std::filesystem::path publish_registry_root(const std::filesystem::path &root, const char *snapshot,
+                                            const std::filesystem::path &index_path, const std::string &index)
+{
+    const auto root_document = std::string("{") +
+                               "\"protocol_version\":1,"
+                               "\"snapshot_id\":\"" +
+                               snapshot +
+                               "\",\"generated_at\":\"2026-08-31T12:00:00+08:00\","
+                               "\"index\":{\"url\":\"" +
+                               file_url(index_path) + "\",\"sha256\":\"" + sha256(index) + "\"}}";
+    const auto root_path = root / "v1" / "root.json";
+    write_text(root_path, root_document);
+    setenv("LILYGO_UI_STORE_REGISTRY_URL", file_url(root_path).c_str(), 1);
+    setenv("LILYGO_UI_STORE_ARCHITECTURE", "arm64", 1);
+    setenv("LILYGO_UI_APPKIT_VERSION", "0.1.0", 1);
+    const auto cache_nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto cache_home  = root / ("cache-" + std::to_string(getpid()) + "-" + std::to_string(cache_nonce));
+    assert(!std::filesystem::exists(cache_home));
+    std::filesystem::create_directories(cache_home);
+    setenv("XDG_CACHE_HOME", cache_home.string().c_str(), 1);
+    return root_path;
+}
 
 RegistryFixturePaths prepare_registry_fixture(const char *output_path, int width, int height)
 {
@@ -177,25 +200,58 @@ RegistryFixturePaths prepare_registry_fixture(const char *output_path, int width
                        "\"detail_url\":\"" +
                        detail_url + "\"}]}";
     write_text(index_path, index);
+    return {icon_path, publish_registry_root(root, snapshot, index_path, index)};
+}
 
-    const auto root_document = std::string("{") +
-                               "\"protocol_version\":1,"
-                               "\"snapshot_id\":\"" +
-                               snapshot +
-                               "\",\"generated_at\":\"2026-08-31T12:00:00+08:00\","
-                               "\"index\":{\"url\":\"" +
-                               file_url(index_path) + "\",\"sha256\":\"" + sha256(index) + "\"}}";
-    const auto root_path = root / "v1" / "root.json";
-    write_text(root_path, root_document);
-    setenv("LILYGO_UI_STORE_REGISTRY_URL", file_url(root_path).c_str(), 1);
-    setenv("LILYGO_UI_STORE_ARCHITECTURE", "arm64", 1);
-    setenv("LILYGO_UI_APPKIT_VERSION", "0.1.0", 1);
-    const auto cache_nonce = std::chrono::steady_clock::now().time_since_epoch().count();
-    const auto cache_home  = root / ("cache-" + std::to_string(getpid()) + "-" + std::to_string(cache_nonce));
-    assert(!std::filesystem::exists(cache_home));
-    std::filesystem::create_directories(cache_home);
-    setenv("XDG_CACHE_HOME", cache_home.string().c_str(), 1);
-    return {icon_path, root_path};
+constexpr std::uint32_t kScrollingCatalogApps = 16;
+
+// Publishes enough apps for the catalog to scroll in every tested viewport.
+void prepare_scrolling_registry_fixture(const char *output_path, int width, int height)
+{
+    const auto root = std::filesystem::path(output_path).parent_path() /
+                      ("registry-scroll-" + std::to_string(width) + "x" + std::to_string(height));
+    constexpr const char *snapshot = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const auto snapshot_root       = root / "v1" / "snapshots" / snapshot;
+    const auto index_path          = snapshot_root / "index.json";
+    const auto package_url         = file_url(root / "scroll.deb");
+    const auto icon_path           = root / "assets" / "scroll-icon.png";
+    write_text(root / "scroll.deb", "payload");
+    std::filesystem::create_directories(icon_path.parent_path());
+    std::error_code copy_error;
+    std::filesystem::copy_file(std::filesystem::path(__FILE__).parent_path().parent_path() / "assets" / "app-icon.png",
+                               icon_path, std::filesystem::copy_options::overwrite_existing, copy_error);
+    assert(!copy_error && std::filesystem::is_regular_file(icon_path));
+    const auto icon_url = file_url(icon_path);
+
+    std::string apps;
+    for (std::uint32_t index = 0; index < kScrollingCatalogApps; ++index) {
+        const auto number   = std::to_string(index + 1);
+        const auto app_id   = "cc.lilygo.ui.Scroll" + number;
+        const auto identity = "\"app_id\":\"" + app_id + "\",\"package\":\"lilygo-ui-scroll" + number +
+                              "\",\"title\":\"Scroll " + number +
+                              "\",\"summary\":\"Scroll position probe.\",\"categories\":[\"Utilities\"],"
+                              "\"icon_url\":\"" +
+                              icon_url + "\"";
+        const auto detail_path = snapshot_root / "apps" / (app_id + ".json");
+        write_text(detail_path, "{\"protocol_version\":1," + identity +
+                                    ",\"description\":\"Scroll position probe.\","
+                                    "\"authors\":[{\"name\":\"LILYGO\",\"github\":\"LILYGO\"}],"
+                                    "\"license\":\"MIT\",\"source_repo\":\"file:///tmp/source\","
+                                    "\"homepage\":\"file:///tmp/home\",\"screenshots\":[],\"permissions\":[],"
+                                    "\"releases\":[{\"version\":\"1.0.0\",\"architecture\":\"arm64\","
+                                    "\"status\":\"published\",\"size\":1048576,\"sha256\":"
+                                    "\"239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5\","
+                                    "\"url\":\"" +
+                                    package_url +
+                                    "\",\"min_appkit_version\":\"0.1.0\","
+                                    "\"published_at\":\"2026-08-31T12:00:00+08:00\"}]}");
+        if (index > 0) apps += ',';
+        apps += "{" + identity + ",\"latest_version\":\"1.0.0\",\"detail_url\":\"" + file_url(detail_path) + "\"}";
+    }
+    const auto index = std::string("{\"protocol_version\":1,\"snapshot_id\":\"") + snapshot +
+                       "\",\"generated_at\":\"2026-08-31T12:00:00+08:00\",\"apps\":[" + apps + "]}";
+    write_text(index_path, index);
+    publish_registry_root(root, snapshot, index_path, index);
 }
 
 void write_stage(lv_display_t *display, const char *path, const char *stage, int width, int height)
@@ -283,23 +339,30 @@ void assert_responsive_shell_layout(int width, int height)
     auto *surface    = lv_obj_find_by_name(lv_screen_active(), "app_surface");
     auto *content    = lv_obj_find_by_name(lv_screen_active(), "app_content");
     auto *navigation = lv_obj_find_by_name(lv_screen_active(), "app_navigation");
-    assert(surface && content && navigation);
+    auto *body       = lv_obj_find_by_name(lv_screen_active(), "page_body");
+    assert(surface && content && navigation && body);
 
     lv_area_t surface_bounds{};
     lv_area_t content_bounds{};
     lv_area_t navigation_bounds{};
+    lv_area_t body_bounds{};
     lv_obj_get_coords(surface, &surface_bounds);
     lv_obj_get_coords(content, &content_bounds);
     lv_obj_get_coords(navigation, &navigation_bounds);
+    lv_obj_get_coords(body, &body_bounds);
     assert(surface_bounds.y1 == CM0_STATUS_BAR_HEIGHT);
     assert(lv_area_get_height(&surface_bounds) == height - CM0_STATUS_BAR_HEIGHT);
-    assert(navigation_bounds.y2 <= height - kHomeIndicatorHeight + 2);
 
     if (width >= 720) {
+        assert(navigation_bounds.y2 <= height + 1);
+        assert(body_bounds.x1 == content_bounds.x1);
+        assert(body_bounds.x2 == content_bounds.x2);
         assert(content_bounds.x1 == navigation_bounds.x2 + 1);
         assert(lv_obj_get_width(navigation) == 180);
-        assert(lv_obj_get_height(navigation) == height - CM0_STATUS_BAR_HEIGHT - kHomeIndicatorHeight);
+        assert(lv_obj_get_height(navigation) == height - CM0_STATUS_BAR_HEIGHT);
     } else {
+        assert(navigation_bounds.y2 <= height - kHomeIndicatorHeight + 2);
+        assert(lv_obj_get_width(body) <= 720);
         assert(navigation_bounds.y1 == content_bounds.y2 + 1);
         assert(lv_obj_get_height(navigation) == 64);
         assert(lv_obj_get_width(navigation) == width);
@@ -323,32 +386,27 @@ void assert_initial_layout(int width, int height)
     auto *surface    = lv_obj_find_by_name(lv_screen_active(), "app_surface");
     auto *content    = lv_obj_find_by_name(lv_screen_active(), "app_content");
     auto *navigation = lv_obj_find_by_name(lv_screen_active(), "app_navigation");
-    auto *header     = lv_obj_find_by_name(lv_screen_active(), "app_header");
     auto *body       = lv_obj_find_by_name(lv_screen_active(), "page_body");
     auto *filter     = lv_obj_find_by_name(lv_screen_active(), "source_filter");
+    auto *header     = lv_obj_find_by_name(lv_screen_active(), "app_header");
     auto *title      = lv_obj_find_by_name(lv_screen_active(), "app_title");
-    assert(surface && content && navigation && header && body && filter && title);
+    assert(surface && content && navigation && body && filter);
+    assert(!header && !title);
 
     lv_area_t surface_bounds{};
     lv_area_t content_bounds{};
     lv_area_t navigation_bounds{};
-    lv_area_t header_bounds{};
     lv_area_t body_bounds{};
     lv_obj_get_coords(surface, &surface_bounds);
     lv_obj_get_coords(content, &content_bounds);
     lv_obj_get_coords(navigation, &navigation_bounds);
-    lv_obj_get_coords(header, &header_bounds);
     lv_obj_get_coords(body, &body_bounds);
     assert(surface_bounds.y1 == CM0_STATUS_BAR_HEIGHT);
     assert(lv_area_get_height(&surface_bounds) == height - CM0_STATUS_BAR_HEIGHT);
-    assert(navigation_bounds.y2 <= height - kHomeIndicatorHeight + 2);
-    assert(lv_obj_get_height(header) == 82);
-    assert(body_bounds.y1 == header_bounds.y2 + 1);
-    assert(lv_obj_get_width(body) <= 720);
+    assert(body_bounds.y1 == content_bounds.y1);
     assert(lv_color_eq(lv_obj_get_style_bg_color(surface, LV_PART_MAIN), lv_color_hex(kSurface)));
     assert(lv_color_eq(lv_obj_get_style_bg_color(navigation, LV_PART_MAIN), lv_color_hex(kSurface)));
     assert(lv_obj_get_child_count(navigation) == 2);
-    assert(std::string(lv_label_get_text(title)) == LILYGO_UI_STORE_APP_NAME);
     assert(lv_obj_get_child_count(filter) == 3);
     assert(button_text(lv_obj_get_child(filter, 0)) == "All");
     assert(button_text(lv_obj_get_child(filter, 1)) == "Official");
@@ -359,14 +417,38 @@ void assert_initial_layout(int width, int height)
     assert_responsive_shell_layout(width, height);
 
     if (width >= 720) {
+        assert(navigation_bounds.y2 <= height + 1);
         assert(content_bounds.x1 == navigation_bounds.x2 + 1);
         assert(lv_obj_get_width(navigation) == 180);
-        assert(lv_obj_get_height(navigation) == height - CM0_STATUS_BAR_HEIGHT - kHomeIndicatorHeight);
+        assert(lv_obj_get_height(navigation) == height - CM0_STATUS_BAR_HEIGHT);
     } else {
+        assert(navigation_bounds.y2 <= height - kHomeIndicatorHeight + 2);
         assert(navigation_bounds.y1 == content_bounds.y2 + 1);
         assert(lv_obj_get_height(navigation) == 64);
         assert(lv_obj_get_width(navigation) == width);
     }
+}
+
+void assert_detail_navigation()
+{
+    auto *screen = lv_screen_active();
+    auto *page   = lv_obj_find_by_name(screen, "detail_page");
+    auto *back   = lv_obj_find_by_name(screen, "back_button");
+    auto *body   = lv_obj_find_by_name(screen, "page_body");
+    assert(page && back && body);
+    assert(!lv_obj_find_by_name(page, "app_header"));
+    assert(!lv_obj_find_by_name(page, "app_title"));
+    assert(lv_obj_get_style_radius(back, LV_PART_MAIN) == LV_RADIUS_CIRCLE);
+    lv_area_t page_bounds{};
+    lv_area_t back_bounds{};
+    lv_area_t body_bounds{};
+    lv_obj_get_coords(page, &page_bounds);
+    lv_obj_get_coords(back, &back_bounds);
+    lv_obj_get_coords(body, &body_bounds);
+    assert(back_bounds.x1 == page_bounds.x1 + 16);
+    assert(back_bounds.y1 == page_bounds.y1 + 16);
+    assert(body_bounds.y1 == page_bounds.y1);
+    assert(body_bounds.y2 == page_bounds.y2);
 }
 
 void assert_detail_resize_round_trip(lv_display_t *display, int expected_body_scroll_y)
@@ -376,10 +458,10 @@ void assert_detail_resize_round_trip(lv_display_t *display, int expected_body_sc
     auto *page    = lv_obj_find_by_name(screen, "detail_page");
     auto *body    = lv_obj_find_by_name(screen, "page_body");
     auto *gallery = lv_obj_find_by_name(screen, "screenshot_gallery");
-    auto *title   = lv_obj_find_by_name(screen, "app_title");
+    auto *back    = lv_obj_find_by_name(screen, "back_button");
     auto *primary = lv_obj_find_by_name(screen, "primary_action");
-    assert(surface && page && body && gallery && title && primary);
-    assert(std::string(lv_label_get_text(title)) == "File Manager");
+    assert(surface && page && body && gallery && back && primary);
+    assert_detail_navigation();
     assert(expected_body_scroll_y > 0);
     assert(lv_obj_get_scroll_y(body) == expected_body_scroll_y);
     assert(lv_obj_get_scroll_x(gallery) == 80);
@@ -400,11 +482,12 @@ void assert_detail_resize_round_trip(lv_display_t *display, int expected_body_sc
     assert(lv_obj_get_scroll_y(body) == expected_body_scroll_y);
     assert(lv_obj_get_scroll_x(gallery) == 80);
     assert(lv_group_get_focused(focus_group) == primary);
-    assert(lv_obj_find_by_name(screen, "back_button"));
-    assert(std::string(lv_label_get_text(lv_obj_find_by_name(screen, "app_title"))) == "File Manager");
+    assert(lv_obj_find_by_name(screen, "back_button") == back);
+    assert_detail_navigation();
 
     resize_display(display, 568, 1232);
     assert_responsive_shell_layout(568, 1232);
+    assert_detail_navigation();
     assert(lv_obj_find_by_name(screen, "app_surface") == surface);
     assert(lv_obj_find_by_name(screen, "detail_page") == page);
     assert(lv_obj_find_by_name(screen, "page_body") == body);
@@ -562,18 +645,27 @@ void assert_action_labels(const std::string &icon_path)
     auto *update_action = lv_obj_find_by_name(update_row, "installed_primary_action");
     auto *action_group  = lv_obj_find_by_name(installed_row, "installed_action_group");
     assert(open_action && update_action);
-    assert(action_group && lv_obj_get_width(action_group) == 116);
-    assert(lv_obj_get_height(action_group) == 44);
+    assert(action_group && lv_obj_get_width(action_group) == 128);
+    assert(lv_obj_get_height(action_group) == 56);
     assert(lv_obj_get_child_count(action_group) == 2);
     assert(lv_obj_get_width(open_action) == 64);
     assert(lv_obj_get_width(lv_obj_get_child(action_group, 1)) == 44);
     assert(lv_obj_get_style_pad_column(installed_row, LV_PART_MAIN) == 12);
+    assert(lv_obj_get_style_pad_left(action_group, LV_PART_MAIN) >= 6);
+    assert(lv_obj_get_style_pad_right(action_group, LV_PART_MAIN) >= 6);
+    assert(lv_obj_get_style_pad_top(action_group, LV_PART_MAIN) >= 6);
+    assert(lv_obj_get_style_pad_bottom(action_group, LV_PART_MAIN) >= 6);
     assert(lv_obj_get_style_pad_column(action_group, LV_PART_MAIN) == 8);
     assert(button_text(open_action) == "Open");
     assert(button_text(update_action) == "Update");
     auto *launcher_actions = lv_obj_find_by_name(launcher_row, "installed_action_group");
     assert(launcher_actions && lv_obj_get_child_count(launcher_actions) == 1);
-    assert(lv_obj_get_width(launcher_actions) == 64);
+    assert(lv_obj_get_width(launcher_actions) == 76);
+    assert(lv_obj_get_height(launcher_actions) == 56);
+    assert(lv_obj_get_style_pad_left(launcher_actions, LV_PART_MAIN) >= 6);
+    assert(lv_obj_get_style_pad_right(launcher_actions, LV_PART_MAIN) >= 6);
+    assert(lv_obj_get_style_pad_top(launcher_actions, LV_PART_MAIN) >= 6);
+    assert(lv_obj_get_style_pad_bottom(launcher_actions, LV_PART_MAIN) >= 6);
     assert(!lv_obj_find_by_name(launcher_row, "installed_remove_action"));
     assert(button_text(lv_obj_get_child(launcher_actions, 0)) == "Update");
     installed_view.destroy();
@@ -633,6 +725,11 @@ void exercise_store_workflow(lv_display_t *display, const char *output_path, int
         if (!catalog_icon_loaded) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     assert(catalog_icon_loaded);
+    auto *catalog_grid = lv_obj_find_by_name(lv_screen_active(), "catalog_grid");
+    auto *catalog_body = lv_obj_find_by_name(lv_screen_active(), "page_body");
+    assert(catalog_grid && lv_obj_get_child_count(catalog_grid) == 1);
+    assert(catalog_body && lv_obj_get_scroll_y(catalog_body) == 0);
+    assert(lv_obj_get_width(demo) == lv_obj_get_content_width(catalog_grid));
     write_stage(display, output_path, "", width, height);
 
     lv_obj_send_event(demo, LV_EVENT_CLICKED, nullptr);
@@ -652,6 +749,8 @@ void exercise_store_workflow(lv_display_t *display, const char *output_path, int
     auto *preview  = lv_obj_find_by_name(lv_screen_active(), "preview_section");
     auto *notice   = lv_obj_find_by_name(lv_screen_active(), "source_notice");
     assert(back && identity && gallery && primary && body && summary && preview && notice);
+    assert_responsive_shell_layout(width, height);
+    assert_detail_navigation();
     assert(app_icon_has_image(identity, "cc.lilygo.ui.Demo"));
     assert(lv_obj_get_width(back) == 48);
     assert(lv_obj_get_height(back) == 48);
@@ -724,6 +823,27 @@ void exercise_store_workflow(lv_display_t *display, const char *output_path, int
     assert(!lv_obj_find_by_name(lv_screen_active(), "remove_action"));
     write_stage(display, output_path, "-detail", width, height);
 
+    back = lv_obj_find_by_name(lv_screen_active(), "back_button");
+    assert(back);
+    lv_obj_send_event(back, LV_EVENT_CLICKED, nullptr);
+    demo = nullptr;
+    for (int attempt = 0; attempt < 100 && !lv_obj_find_by_name(lv_screen_active(), "catalog_page"); ++attempt) {
+        lv_tick_inc(1);
+        lv_timer_handler();
+        lv_obj_update_layout(lv_screen_active());
+    }
+    demo = lv_obj_find_by_name(lv_screen_active(), "demo");
+    assert(demo);
+    body = lv_obj_find_by_name(lv_screen_active(), "page_body");
+    assert(body && lv_obj_get_scroll_y(body) == 0);
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        lv_tick_inc(50);
+        lv_timer_handler();
+        lv_obj_update_layout(lv_screen_active());
+    }
+    body = lv_obj_find_by_name(lv_screen_active(), "page_body");
+    assert(body && lv_obj_get_scroll_y(body) == 0);
+
     auto *navigation    = lv_obj_find_by_name(lv_screen_active(), "app_navigation");
     auto *installed_nav = lv_obj_get_child(navigation, 1);
     lv_obj_send_event(installed_nav, LV_EVENT_CLICKED, nullptr);
@@ -737,6 +857,7 @@ void exercise_store_workflow(lv_display_t *display, const char *output_path, int
     }
     assert(!lv_obj_find_by_name(lv_screen_active(), "source_filter"));
     assert(installed_summary);
+    assert_responsive_shell_layout(width, height);
     assert(lv_obj_find_by_name(lv_screen_active(), "storage_overview"));
     assert(lv_obj_find_by_name(lv_screen_active(), "installed_empty_state"));
     write_stage(display, output_path, "-installed", width, height);
@@ -757,6 +878,100 @@ void exercise_store_workflow(lv_display_t *display, const char *output_path, int
     assert(button_text(action) == "Get");
 }
 
+// Runs longer than LVGL's longest (400 ms) scroll animation.
+void settle_ui(lv_obj_t *root)
+{
+    for (int elapsed = 0; elapsed < 600; elapsed += 10) {
+        lv_tick_inc(10);
+        lv_timer_handler();
+    }
+    lv_obj_update_layout(root);
+}
+
+lv_obj_t *wait_for_object(lv_obj_t *root, const char *name)
+{
+    lv_obj_t *object = nullptr;
+    for (int attempt = 0; attempt < 100 && !object; ++attempt) {
+        lv_tick_inc(1);
+        lv_timer_handler();
+        lv_obj_update_layout(root);
+        object = lv_obj_find_by_name(root, name);
+    }
+    return object;
+}
+
+// A pointer press focuses its target in the default group before the click.
+void press_and_click(lv_obj_t *object)
+{
+    assert(object && lv_obj_get_group(object));
+    lv_group_focus_obj(object);
+    lv_obj_send_event(object, LV_EVENT_CLICKED, nullptr);
+}
+
+void exercise_list_scroll_restoration(const cm0_app_descriptor_t *descriptor, const cm0_app_context_t &context,
+                                      const char *output_path, int width, int height)
+{
+    descriptor->close();
+    prepare_scrolling_registry_fixture(output_path, width, height);
+    descriptor->open(&context);
+
+    bool catalog_ready = false;
+    for (int attempt = 0; attempt < 400 && !catalog_ready; ++attempt) {
+        lv_tick_inc(10);
+        lv_timer_handler();
+        lv_obj_update_layout(context.root);
+        auto *grid    = lv_obj_find_by_name(context.root, "catalog_grid");
+        catalog_ready = grid && lv_obj_get_child_count(grid) == kScrollingCatalogApps &&
+                        !lv_obj_find_by_name(context.root, "registry_status");
+        for (std::uint32_t index = 0; catalog_ready && index < kScrollingCatalogApps; ++index)
+            catalog_ready = app_icon_has_image(grid, "cc.lilygo.ui.Scroll" + std::to_string(index + 1));
+        if (!catalog_ready) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(catalog_ready);
+    settle_ui(context.root);
+
+    auto *grid = lv_obj_find_by_name(context.root, "catalog_grid");
+    auto *body = lv_obj_find_by_name(context.root, "page_body");
+    assert(grid && body && lv_obj_get_scroll_y(body) == 0);
+    assert(lv_obj_get_scroll_bottom(body) > 0);
+    lv_obj_scroll_to_y(body, lv_obj_get_scroll_bottom(body) / 2, LV_ANIM_OFF);
+    const auto list_scroll_y = lv_obj_get_scroll_y(body);
+    assert(list_scroll_y > 0);
+
+    lv_area_t viewport{};
+    lv_obj_get_coords(body, &viewport);
+    lv_obj_t *card = nullptr;
+    for (std::uint32_t index = 0; index < lv_obj_get_child_count(grid) && !card; ++index) {
+        lv_area_t bounds{};
+        lv_obj_get_coords(lv_obj_get_child(grid, index), &bounds);
+        if (bounds.y1 >= viewport.y1 && bounds.y2 <= viewport.y2) card = lv_obj_get_child(grid, index);
+    }
+    press_and_click(card);
+    assert(wait_for_object(context.root, "detail_page"));
+    settle_ui(context.root);
+    body = lv_obj_find_by_name(context.root, "page_body");
+    assert(body && lv_obj_get_scroll_y(body) == 0);
+
+    // Back recreates the catalog at the offset the user left it, instead of
+    // following the focus group to the last card.
+    press_and_click(lv_obj_find_by_name(context.root, "back_button"));
+    assert(wait_for_object(context.root, "catalog_page"));
+    settle_ui(context.root);
+    body = lv_obj_find_by_name(context.root, "page_body");
+    assert(body && lv_obj_get_scroll_y(body) == list_scroll_y);
+
+    // Switching tabs shows the catalog from the top, not scrolled to its last card.
+    press_and_click(lv_obj_find_by_name(context.root, "navigation_installed"));
+    assert(wait_for_object(context.root, "installed_page"));
+    press_and_click(lv_obj_find_by_name(context.root, "navigation_store"));
+    assert(wait_for_object(context.root, "catalog_page"));
+    settle_ui(context.root);
+    body = lv_obj_find_by_name(context.root, "page_body");
+    assert(body && lv_obj_get_scroll_y(body) == 0);
+
+    descriptor->close();
+}
+
 }  // namespace
 
 int main(int argc, char **argv)
@@ -771,6 +986,9 @@ int main(int argc, char **argv)
     framebuffer.resize(static_cast<std::size_t>(width) * height);
     std::vector<lv_color32_t> draw_buffer(static_cast<std::size_t>(width) * kPartialRows);
     lv_init();
+    auto *input_group = lv_group_create();
+    assert(input_group);
+    lv_group_set_default(input_group);
     auto *display = lv_display_create(width, height);
     assert(display);
     lv_display_set_buffers(display, draw_buffer.data(), nullptr,
@@ -801,9 +1019,10 @@ int main(int argc, char **argv)
     if (width == 568 && height == 1232) {
         exercise_cached_catalog_fallback(descriptor, context, fixture.root);
         exercise_app_lifecycle(descriptor, context);
-    } else {
-        descriptor->close();
     }
+    exercise_list_scroll_restoration(descriptor, context, argv[3], width, height);
+    lv_group_set_default(nullptr);
+    lv_group_delete(input_group);
     lv_display_delete(display);
     lilygo_ui_fonts_deinit();
     lv_deinit();

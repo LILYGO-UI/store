@@ -15,7 +15,8 @@ Registry v1 客户端和独立的商店状态模型，可浏览 Registry 应用�
 - 从 LILYGO Registry Pages 读取不可变应用目录 snapshot
 - 安装前校验 Debian 包大小和 SHA-256
 - 适配 AppKit 默认的 568×1232 竖屏、1232×568 横屏和 320×568 紧凑竖屏
-- 自动避让 AppKit 管理的 96px 状态栏和 38px Home Indicator 安全区
+- 自动避让 AppKit 管理的 96px 状态栏；竖屏底部导航预留 38px Home Indicator 安全区，
+  横屏侧栏铺满状态栏以下的高度
 
 Store 默认从以下只读 Pages 端点加载 Registry v1：
 

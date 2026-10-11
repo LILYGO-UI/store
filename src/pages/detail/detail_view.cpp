@@ -9,6 +9,28 @@
 
 namespace {
 
+void create_floating_back_button(lv_obj_t *surface, const DetailViewCallbacks &callbacks)
+{
+    auto *back = make_button(surface, LV_SYMBOL_LEFT, 22, COLOR_SURFACE, COLOR_ACCENT, callbacks.back);
+    lv_obj_set_name_static(back, "back_button");
+    lv_obj_set_size(back, 48, 48);
+    lv_obj_set_style_pad_all(back, 0, 0);
+    lv_obj_set_style_radius(back, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(back, 1, 0);
+    lv_obj_set_style_border_color(back, lv_color_hex(COLOR_SEPARATOR), 0);
+    lv_obj_add_flag(back, LV_OBJ_FLAG_FLOATING);
+    lv_obj_align(back, LV_ALIGN_TOP_LEFT, 16, 16);
+}
+
+void reserve_back_button_space(lv_obj_t *body)
+{
+    // The back button is attached to the page surface, so reserve its area in
+    // the scrolling content without making the button itself scroll.
+    auto *inset = make_flex(body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_name_static(inset, "detail_top_inset");
+    lv_obj_set_size(inset, LV_PCT(100), 48);
+}
+
 void create_identity(lv_obj_t *body, const StoreApp &app, std::size_t index)
 {
     auto *identity_row = make_flex(body, LV_FLEX_FLOW_ROW);
@@ -264,8 +286,9 @@ namespace {
 void build_detail_view(lv_obj_t *content, DetailViewModel &view_model, const DetailViewCallbacks &callbacks)
 {
     const auto *app = view_model.app();
-    make_header(content, app ? app->name.c_str() : "App Detail", callbacks.back);
-    auto *body = make_page_body(content);
+    auto *body      = make_page_body(content);
+    create_floating_back_button(content, callbacks);
+    reserve_back_button_space(body);
     if (!app) return;
 
     create_identity(body, *app, view_model.app_index());

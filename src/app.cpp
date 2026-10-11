@@ -68,11 +68,13 @@ struct AppViewState {
     bool online_refresh_finished          = false;
     bool online_refresh_succeeded         = false;
     std::string online_refresh_error;
-    bool operation_running       = false;
-    bool page_render_pending     = false;
-    bool closing                 = false;
-    void (*request_exit)(void *) = nullptr;
-    void *request_exit_user_data = nullptr;
+    bool operation_running              = false;
+    bool page_render_pending            = false;
+    std::int32_t detail_origin_scroll_y = 0;
+    bool restore_detail_origin_scroll   = false;
+    bool closing                        = false;
+    void (*request_exit)(void *)        = nullptr;
+    void *request_exit_user_data        = nullptr;
 
     void prepare_session()
     {
@@ -87,11 +89,13 @@ struct AppViewState {
         online_refresh_finished  = false;
         online_refresh_succeeded = false;
         online_refresh_error.clear();
-        operation_running      = false;
-        page_render_pending    = false;
-        closing                = false;
-        request_exit           = nullptr;
-        request_exit_user_data = nullptr;
+        operation_running            = false;
+        page_render_pending          = false;
+        detail_origin_scroll_y       = 0;
+        restore_detail_origin_scroll = false;
+        closing                      = false;
+        request_exit                 = nullptr;
+        request_exit_user_data       = nullptr;
     }
 };
 
@@ -304,12 +308,22 @@ std::size_t event_index(lv_event_t *event)
     return static_cast<std::size_t>(reinterpret_cast<std::uintptr_t>(lv_event_get_user_data(event)));
 }
 
-void select_app_event(lv_event_t *event)
+void show_detail_page()
 {
-    if (!app_state.catalog || !app_state.catalog->select(event_index(event))) return;
+    // Back recreates the originating list, so remember where the user left it.
+    if (app_state.router.page() != StorePage::detail) {
+        auto *body                       = lv_obj_find_by_name(app_state.content, "page_body");
+        app_state.detail_origin_scroll_y = body ? lv_obj_get_scroll_y(body) : 0;
+    }
     app_state.router.show_detail();
     start_detail_screenshot_downloads();
     request_page_render();
+}
+
+void select_app_event(lv_event_t *event)
+{
+    if (!app_state.catalog || !app_state.catalog->select(event_index(event))) return;
+    show_detail_page();
 }
 
 void catalog_quick_action_event(lv_event_t *event)
@@ -332,11 +346,7 @@ void installed_primary_action_event(lv_event_t *event)
         start_install(index);
         return;
     }
-    if (app_state.installed && app_state.installed->select(index)) {
-        app_state.router.show_detail();
-        start_detail_screenshot_downloads();
-        request_page_render();
-    }
+    if (app_state.installed && app_state.installed->select(index)) show_detail_page();
 }
 
 void installed_remove_event(lv_event_t *event)
@@ -351,12 +361,15 @@ void navigation_event(lv_event_t *event)
         app_state.router.show_catalog();
     else
         app_state.router.show_installed();
+    app_state.restore_detail_origin_scroll = false;
     request_page_render();
 }
 
 void back_event(lv_event_t *)
 {
-    if (app_state.router.back()) request_page_render();
+    if (!app_state.router.back()) return;
+    app_state.restore_detail_origin_scroll = true;
+    request_page_render();
 }
 
 void detail_primary_action_event(lv_event_t *)
@@ -379,24 +392,26 @@ StorePage active_navigation_page()
     return app_state.router.page() == StorePage::detail ? app_state.router.detail_origin() : app_state.router.page();
 }
 
+struct NavigationItem {
+    StorePage page;
+    const char *icon;
+    const char *label;
+    const char *name;
+};
+
+constexpr NavigationItem kNavigationItems[] = {
+    {StorePage::catalog, LV_SYMBOL_DOWNLOAD, "Store", "navigation_store"},
+    {StorePage::installed, "\xEF\x80\x89", "Installed", "navigation_installed"},
+};
+
+// Navigation buttons live for the whole session; renders only restyle them.
+// Deleting a focused button makes LVGL refocus the previous group member,
+// wrapping to the new page's last button, and scroll that button into view.
 void create_navigation()
 {
-    lv_obj_clean(app_state.navigation);
-    struct NavItem {
-        StorePage page;
-        const char *icon;
-        const char *label;
-    };
-    static constexpr NavItem items[] = {
-        {StorePage::catalog, LV_SYMBOL_DOWNLOAD, "Store"},
-        {StorePage::installed, "\xEF\x80\x89", "Installed"},
-    };
-
-    for (const auto &item : items) {
-        const bool selected = active_navigation_page() == item.page;
-        auto *button        = lv_button_create(app_state.navigation);
-        lv_obj_set_name_static(button, item.page == StorePage::catalog ? "navigation_store" : "navigation_installed");
-        style_box(button, selected ? COLOR_ACCENT_SOFT : COLOR_SURFACE, 8);
+    for (const auto &item : kNavigationItems) {
+        auto *button = lv_button_create(app_state.navigation);
+        lv_obj_set_name_static(button, item.name);
         lv_obj_set_style_pad_all(button, 4, 0);
         lv_obj_set_style_pad_row(button, 2, 0);
         lv_obj_set_style_pad_column(button, 10, 0);
@@ -404,10 +419,22 @@ void create_navigation()
         lv_obj_set_flex_align(button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_add_event_cb(button, navigation_event, LV_EVENT_CLICKED,
                             reinterpret_cast<void *>(static_cast<std::intptr_t>(item.page)));
-        auto *icon = make_label(button, item.icon, 22, selected ? COLOR_ACCENT : COLOR_SECONDARY);
+        auto *icon = make_label(button, item.icon, 22, COLOR_SECONDARY);
         lv_obj_set_name_static(icon, "navigation_icon");
-        auto *label = make_label(button, item.label, 14, selected ? COLOR_ACCENT : COLOR_SECONDARY);
+        auto *label = make_label(button, item.label, 14, COLOR_SECONDARY);
         lv_obj_set_name_static(label, "navigation_label");
+    }
+}
+
+void update_navigation()
+{
+    for (std::uint32_t index = 0; index < std::size(kNavigationItems); ++index) {
+        auto *button        = lv_obj_get_child(app_state.navigation, index);
+        const bool selected = active_navigation_page() == kNavigationItems[index].page;
+        const auto color    = lv_color_hex(selected ? COLOR_ACCENT : COLOR_SECONDARY);
+        style_box(button, selected ? COLOR_ACCENT_SOFT : COLOR_SURFACE, 8);
+        lv_obj_set_style_text_color(lv_obj_find_by_name(button, "navigation_icon"), color, 0);
+        lv_obj_set_style_text_color(lv_obj_find_by_name(button, "navigation_label"), color, 0);
     }
 }
 
@@ -431,8 +458,13 @@ void render_page_now()
             break;
     }
 
-    create_navigation();
+    update_navigation();
     apply_layout();
+    if (app_state.restore_detail_origin_scroll) {
+        app_state.restore_detail_origin_scroll = false;
+        if (auto *body = lv_obj_find_by_name(app_state.content, "page_body"))
+            lv_obj_scroll_to_y(body, app_state.detail_origin_scroll_y, LV_ANIM_OFF);
+    }
 }
 
 void request_page_render()
@@ -454,6 +486,11 @@ void apply_layout()
 
     const auto width = lv_obj_get_content_width(app_state.surface);
     const bool wide  = width >= 720;
+    // The bottom navigation needs the Home Indicator inset, while the
+    // landscape sidebar can use the full height below the status bar. Keeping
+    // the inset in the row layout leaves a visible blank strip under the
+    // sidebar and shrinks the browsing area for no interactive control.
+    lv_obj_set_style_pad_bottom(app_state.surface, wide ? 0 : kHomeIndicatorSafeArea, 0);
     lv_obj_set_flex_flow(app_state.surface, wide ? LV_FLEX_FLOW_ROW : LV_FLEX_FLOW_COLUMN);
 
     lv_obj_set_flex_align(app_state.content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -461,7 +498,10 @@ void apply_layout()
     if (body) {
         const bool detail = app_state.router.page() == StorePage::detail;
         lv_obj_set_width(body, LV_PCT(100));
-        lv_obj_set_style_max_width(body, kContentMaxWidth, 0);
+        // In landscape the sidebar already provides the page boundary, so
+        // let the browsing surface use the entire remaining width. Keep the
+        // narrower reading measure on portrait screens.
+        lv_obj_set_style_max_width(body, wide ? LV_COORD_MAX : kContentMaxWidth, 0);
         lv_obj_set_style_pad_hor(body, 16, 0);
         lv_obj_set_style_pad_ver(body, detail ? 20 : 16, 0);
         lv_obj_set_style_pad_row(body, detail ? 16 : 12, 0);
@@ -509,6 +549,23 @@ void apply_layout()
             lv_obj_set_flex_align(button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
             lv_obj_set_style_pad_hor(button, 4, 0);
         }
+    }
+
+    // The catalog uses a wrapping card grid in wide layouts. Derive card
+    // widths from the now-measured browsing area so the grid consumes it.
+    lv_obj_update_layout(app_state.content);
+    if (auto *grid = lv_obj_find_by_name(app_state.content, "catalog_grid")) {
+        const auto grid_width  = lv_obj_get_content_width(grid);
+        const bool two_columns = wide && grid_width >= 600 && lv_obj_get_child_count(grid) > 1;
+        const auto card_width  = two_columns ? static_cast<int>((grid_width - 12) / 2) : 0;
+        for (std::uint32_t index = 0; index < lv_obj_get_child_count(grid); ++index) {
+            auto *card = lv_obj_get_child(grid, index);
+            if (two_columns)
+                lv_obj_set_width(card, card_width);
+            else
+                lv_obj_set_width(card, LV_PCT(100));
+        }
+        lv_obj_update_layout(grid);
     }
 }
 
@@ -573,6 +630,7 @@ void app_open(const cm0_app_context_t *context)
     lv_obj_set_style_border_color(app_state.navigation, lv_color_hex(COLOR_SEPARATOR), 0);
     lv_obj_set_style_border_width(app_state.navigation, 1, 0);
     lv_obj_clear_flag(app_state.navigation, LV_OBJ_FLAG_SCROLLABLE);
+    create_navigation();
 
     render_page_now();
     app_state.worker_timer = lv_timer_create(poll_workers, 100, nullptr);

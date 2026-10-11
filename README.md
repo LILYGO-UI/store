@@ -18,8 +18,9 @@ applications, and installing, updating, or removing packages.
 - Verify Debian package size and SHA-256 before installation
 - Adapt to AppKit's default 568x1232 portrait, 1232x568 landscape, and 320x568
   compact portrait displays
-- Automatically respect the 96 px status bar and 38 px Home Indicator safe areas
-  managed by AppKit
+- Automatically respect AppKit's 96 px status bar and the 38 px Home Indicator safe area
+  for portrait bottom navigation; landscape side navigation uses the full height below
+  the status bar
 
 By default, the Store loads Registry v1 from this read-only Pages endpoint:
 
