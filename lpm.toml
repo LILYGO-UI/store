@@ -2,7 +2,7 @@ schema_version = 1
 
 [project]
 package = "lilygo-ui-store"
-version = "0.1.1"
+version = "0.1.2"
 app_id = "cc.lilygo.ui.Store"
 title = "Store"
 summary = "Browse, install, and manage LILYGO UI apps."
@@ -21,7 +21,11 @@ icon = "assets/app-icon.png"
 
 [[project.assets.screenshots]]
 path = "assets/previews/store-portrait.png"
-caption = "Browse and manage LILYGO UI applications."
+caption = "Browse and manage LILYGO UI applications in portrait orientation."
+
+[[project.assets.screenshots]]
+path = "assets/previews/store-landscape.png"
+caption = "Browse and manage LILYGO UI applications in landscape orientation."
 
 [[project.permissions]]
 id = "network"
