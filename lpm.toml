@@ -2,7 +2,7 @@ schema_version = 1
 
 [project]
 package = "lilygo-ui-store"
-version = "0.1.2"
+version = "0.1.3"
 app_id = "cc.lilygo.ui.Store"
 title = "Store"
 summary = "Browse, install, and manage LILYGO UI apps."
