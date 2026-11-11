@@ -33,6 +33,30 @@ struct Fixture {
     std::map<std::string, std::string> documents;
 };
 
+class ScopedEnvironmentVariable {
+public:
+    ScopedEnvironmentVariable(const char *name, const char *value) : name_(name)
+    {
+        const auto *previous = std::getenv(name);
+        had_previous_        = previous != nullptr;
+        if (previous) previous_ = previous;
+        assert((value ? setenv(name, value, 1) : unsetenv(name)) == 0);
+    }
+
+    ~ScopedEnvironmentVariable()
+    {
+        assert((had_previous_ ? setenv(name_.c_str(), previous_.c_str(), 1) : unsetenv(name_.c_str())) == 0);
+    }
+
+    ScopedEnvironmentVariable(const ScopedEnvironmentVariable &)            = delete;
+    ScopedEnvironmentVariable &operator=(const ScopedEnvironmentVariable &) = delete;
+
+private:
+    std::string name_;
+    std::string previous_;
+    bool had_previous_ = false;
+};
+
 std::string file_url(const std::filesystem::path &path)
 {
     return "file://" + std::filesystem::absolute(path).string();
@@ -102,8 +126,37 @@ bool has_argument_pair(const std::vector<std::string> &arguments, const std::str
     return false;
 }
 
-Fixture make_registry_fixture(const std::string &source_repo = "https://github.com/LILYGO-UI/demo")
+RegistryRelease make_registry_release(const std::string &version = "1.2.3", const std::string &architecture = "arm64",
+                                      const std::string &status             = "published",
+                                      const std::string &min_appkit_version = "0.1.0")
 {
+    return {version,
+            architecture,
+            status,
+            7,
+            "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5",
+            "https://registry.test/packages/demo_" + version + "_" + architecture + ".deb",
+            min_appkit_version,
+            "2026-08-31T12:00:00+08:00",
+            status == "yanked" ? "Withdrawn test release" : ""};
+}
+
+Fixture make_registry_fixture(const std::string &source_repo               = "https://github.com/LILYGO-UI/demo",
+                              const std::vector<RegistryRelease> &releases = {make_registry_release()})
+{
+    std::string release_documents;
+    std::string latest_version;
+    for (const auto &release : releases) {
+        if (!release_documents.empty()) release_documents += ',';
+        release_documents += "{\"version\":\"" + release.version + "\",\"architecture\":\"" + release.architecture +
+                             "\",\"status\":\"" + release.status + "\",\"size\":" + std::to_string(release.size) +
+                             ",\"sha256\":\"" + release.sha256 + "\",\"url\":\"" + release.url +
+                             "\",\"min_appkit_version\":\"" + release.min_appkit_version + "\",\"published_at\":\"" +
+                             release.published_at + "\",\"reason\":\"" + release.reason + "\"}";
+        if (release.status == "published" &&
+            (latest_version.empty() || debian_version_compare(release.version, latest_version) > 0))
+            latest_version = release.version;
+    }
     const std::string detail_url = std::string(kBase) + "/v1/snapshots/" + kSnapshot + "/apps/cc.lilygo.ui.Demo.json";
     const std::string icon_url   = std::string(kBase) + "/assets/demo.png";
     const std::string detail =
@@ -127,18 +180,8 @@ Fixture make_registry_fixture(const std::string &source_repo = "https://github.c
         "\"screenshots\":[{\"url\":\"https://registry.test/assets/screen.png\","
         "\"caption\":\"主界面\"}],"
         "\"permissions\":[{\"id\":\"network\",\"reason\":\"获取在线数据\"}],"
-        "\"releases\":[{"
-        "\"version\":\"1.2.3\","
-        "\"architecture\":\"arm64\","
-        "\"status\":\"published\","
-        "\"size\":7,"
-        "\"sha256\":"
-        "\"239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5\","
-        "\"url\":\"https://github.com/LILYGO-UI/packages/releases/download/"
-        "apt-pool-lilygo-ui-demo/sha256-test.deb\","
-        "\"min_appkit_version\":\"0.1.0\","
-        "\"published_at\":\"2026-08-31T12:00:00+08:00\""
-        "}]}";
+        "\"releases\":[" +
+        release_documents + "]}";
     const std::string index =
         "{"
         "\"protocol_version\":1,"
@@ -155,7 +198,9 @@ Fixture make_registry_fixture(const std::string &source_repo = "https://github.c
         "\"icon_url\":\"" +
         icon_url +
         "\","
-        "\"latest_version\":\"1.2.3\","
+        "\"latest_version\":\"" +
+        latest_version +
+        "\","
         "\"detail_url\":\"" +
         detail_url + "\"}]}";
     const std::string index_url = std::string(kBase) + "/v1/snapshots/" + kSnapshot + "/index.json";
@@ -214,12 +259,13 @@ public:
     std::string launcher_handoff_content;
     std::string package_install_error;
     std::string installed_status = "ii ";
+    ProcessResult architecture_result{0, "arm64\n", {}, false};
 
     ProcessResult run(const std::vector<std::string> &arguments, std::size_t) override
     {
         calls.push_back(arguments);
         if (arguments.size() >= 2 && arguments[0] == "dpkg" && arguments[1] == "--print-architecture")
-            return {0, "arm64\n", {}, false};
+            return architecture_result;
         if (!arguments.empty() && arguments[0] == "dpkg-query") {
             const auto found = installed.find(arguments.back());
             if (found == installed.end()) return {1, {}, "not installed", false};
@@ -490,7 +536,9 @@ void test_store_service_and_package_verification()
     const auto rejected                = packages.install("lilygo-ui-demo", bad_release);
     assert(!rejected);
     assert(rejected.error.find("SHA-256") != std::string::npos);
-    assert(runner.calls.size() == call_count);
+    assert(std::all_of(runner.calls.cbegin() + call_count, runner.calls.cend(), [](const auto &arguments) {
+        return arguments == std::vector<std::string>{"dpkg", "--print-architecture"};
+    }));
 
     auto wrong_size = refreshed.apps.front().release;
     wrong_size.size += 1;
@@ -498,7 +546,9 @@ void test_store_service_and_package_verification()
     const auto size_rejected   = packages.install("lilygo-ui-demo", wrong_size);
     assert(!size_rejected);
     assert(size_rejected.error.find("size") != std::string::npos);
-    assert(runner.calls.size() == size_call_count);
+    assert(std::all_of(runner.calls.cbegin() + size_call_count, runner.calls.cend(), [](const auto &arguments) {
+        return arguments == std::vector<std::string>{"dpkg", "--print-architecture"};
+    }));
 
     auto yanked   = refreshed.apps.front().release;
     yanked.status = "yanked";
@@ -532,6 +582,151 @@ void test_store_service_and_package_verification()
     const auto removed = packages.remove("lilygo-ui-demo");
     assert(removed);
     assert(!packages.query("lilygo-ui-demo").installed);
+}
+
+void test_store_architecture_selection()
+{
+    const auto refresh = [](const std::vector<RegistryRelease> &releases, const std::string &architecture,
+                            const std::string &installed_version = std::string{}) {
+        const auto fixture = make_registry_fixture("https://github.com/LILYGO-UI/demo", releases);
+        FakeHttpClient http;
+        http.documents = fixture.documents;
+        FakeProcessRunner runner;
+        runner.architecture_result.output        = architecture + "\n";
+        runner.installed["lilygo-ui-appkit-dev"] = "0.1.0";
+        if (!installed_version.empty()) runner.installed["lilygo-ui-demo"] = installed_version;
+        RegistryClient registry(http);
+        PackageManager packages(runner, http);
+        return StoreService(registry, packages).refresh(fixture.root_url);
+    };
+
+    for (const auto &architecture : {std::string("arm64"), std::string("riscv64")}) {
+        const auto other_architecture = architecture == "arm64" ? "riscv64" : "arm64";
+        std::vector<RegistryRelease> mixed{
+            make_registry_release("1.9.0", architecture),
+            make_registry_release("2:1.0-1", other_architecture),
+            make_registry_release("1:1.0-2", architecture),
+            make_registry_release("1.10.0", architecture),
+        };
+        for (int order = 0; order < 2; ++order) {
+            const auto result = refresh(mixed, architecture, "1:1.0-1");
+            assert(result && result.apps.size() == 1);
+            const auto &app = result.apps.front();
+            assert(app.available && app.installed && app.update_available);
+            assert(app.version == "1:1.0-1");
+            assert(app.latest_version == "1:1.0-2");
+            assert(app.release.version == "1:1.0-2");
+            assert(app.release.architecture == architecture);
+            assert(app.release.url == make_registry_release("1:1.0-2", architecture).url);
+            std::reverse(mixed.begin(), mixed.end());
+        }
+
+        const auto up_to_date = refresh(mixed, architecture, "1:1.0-2");
+        assert(up_to_date && up_to_date.apps.size() == 1);
+        assert(!up_to_date.apps.front().update_available);
+        assert(up_to_date.apps.front().latest_version == "1:1.0-2");
+
+        const auto universal = refresh({make_registry_release("1.2.3", "all")}, architecture);
+        assert(universal && universal.apps.size() == 1);
+        assert(universal.apps.front().available);
+        assert(universal.apps.front().release.architecture == "all");
+
+        const auto newer_universal = refresh(
+            {make_registry_release("1.0.0", architecture), make_registry_release("2.0.0", "all")}, architecture);
+        assert(newer_universal && newer_universal.apps.size() == 1);
+        assert(newer_universal.apps.front().latest_version == "2.0.0");
+        assert(newer_universal.apps.front().release.architecture == "all");
+
+        std::vector<RegistryRelease> tied{make_registry_release("1.2.3", "all"),
+                                          make_registry_release("1.2.3", architecture)};
+        for (int order = 0; order < 2; ++order) {
+            const auto preferred_native = refresh(tied, architecture);
+            assert(preferred_native && preferred_native.apps.size() == 1);
+            assert(preferred_native.apps.front().release.architecture == architecture);
+            std::reverse(tied.begin(), tied.end());
+        }
+
+        const auto eligible =
+            refresh({make_registry_release("9.0.0", architecture, "yanked"),
+                     make_registry_release("8.0.0", architecture, "revoked"),
+                     make_registry_release("7.0.0", architecture, "published", "0.2.0"),
+                     make_registry_release("6.0.0", "all", "published", "0.2.0"),
+                     make_registry_release("5.0.0", other_architecture), make_registry_release("1.2.3", architecture)},
+                    architecture);
+        assert(eligible && eligible.apps.size() == 1);
+        assert(eligible.apps.front().release.architecture == architecture);
+        assert(eligible.apps.front().latest_version == "1.2.3");
+
+        const std::vector<RegistryRelease> foreign_only{make_registry_release("9.0.0", other_architecture)};
+        const auto hidden = refresh(foreign_only, architecture);
+        assert(hidden && hidden.apps.empty());
+
+        const auto retained = refresh(foreign_only, architecture, "1.0.0");
+        assert(retained && retained.apps.size() == 1);
+        const auto &installed = retained.apps.front();
+        assert(installed.installed && !installed.available && !installed.update_available);
+        assert(installed.version == "1.0.0" && installed.latest_version == "1.0.0");
+        assert(installed.release.version.empty() && installed.release.url.empty());
+
+        StoreModel model(retained.apps);
+        assert(model.matches_filter(model.apps().front()));
+        assert(model.remove(0));
+        for (const auto filter : {CatalogFilter::all, CatalogFilter::official, CatalogFilter::community}) {
+            model.set_filter(filter);
+            assert(!model.matches_filter(model.apps().front()));
+        }
+    }
+}
+
+void test_package_architecture_detection_and_installation()
+{
+    FakeHttpClient http;
+    FakeProcessRunner runner;
+    PackageManager packages(runner, http);
+    runner.architecture_result.output = "riscv64\n";
+    assert(packages.architecture() == "riscv64");
+    {
+        ScopedEnvironmentVariable override_architecture("LILYGO_UI_STORE_ARCHITECTURE", "arm64");
+        const auto call_count = runner.calls.size();
+        assert(packages.architecture() == "arm64");
+        assert(runner.calls.size() == call_count);
+    }
+    assert(packages.architecture() == "riscv64");
+    runner.architecture_result = {1, {}, "dpkg unavailable", false};
+#if defined(__aarch64__) || defined(_M_ARM64)
+    assert(packages.architecture() == "arm64");
+#elif defined(__x86_64__) || defined(_M_X64)
+    assert(packages.architecture() == "amd64");
+#elif defined(__riscv) && __riscv_xlen == 64
+    assert(packages.architecture() == "riscv64");
+#else
+    assert(packages.architecture().empty());
+#endif
+
+    for (const auto &architecture : {std::string("arm64"), std::string("riscv64")}) {
+        runner.architecture_result    = {0, architecture + "\n", {}, false};
+        const auto other_architecture = architecture == "arm64" ? "riscv64" : "arm64";
+        runner.calls.clear();
+        http.download_urls.clear();
+        const auto rejected = packages.install("lilygo-ui-demo", make_registry_release("1.2.3", other_architecture));
+        assert(!rejected);
+        assert(rejected.error.find("architecture") != std::string::npos);
+        assert(http.download_urls.empty());
+        assert(std::none_of(runner.calls.cbegin(), runner.calls.cend(),
+                            [](const auto &arguments) { return !arguments.empty() && arguments.front() == "pkexec"; }));
+        for (const auto &accepted_architecture : {architecture, std::string("all")}) {
+            runner.calls.clear();
+            http.download_urls.clear();
+            const auto release   = make_registry_release("1.2.3", accepted_architecture);
+            const auto installed = packages.install("lilygo-ui-demo", release);
+            assert(installed && installed.installed_version == "1.2.3");
+            assert(http.download_urls == std::vector<std::string>{release.url});
+            assert(std::any_of(runner.calls.cbegin(), runner.calls.cend(), [](const auto &arguments) {
+                return arguments.size() > 1 && arguments[0] == "pkexec" &&
+                       arguments[1] == LILYGO_UI_STORE_PACKAGE_INSTALL_HELPER;
+            }));
+        }
+    }
 }
 
 void test_github_api_package_download()
@@ -771,11 +966,15 @@ int main(int argc, char **argv)
     assert(completed.output_limit_exceeded);
     assert(completed.output == std::string(8, 'x'));
 
+    ScopedEnvironmentVariable architecture("LILYGO_UI_STORE_ARCHITECTURE", nullptr);
+    ScopedEnvironmentVariable appkit_version("LILYGO_UI_APPKIT_VERSION", nullptr);
     test_router();
     test_model();
     test_json_sha_and_debian_versions();
     test_registry_snapshot_protocol();
     test_store_service_and_package_verification();
+    test_store_architecture_selection();
+    test_package_architecture_detection_and_installation();
     test_github_api_package_download();
     test_registry_root_cache();
     test_image_download_validation_and_curl_options();

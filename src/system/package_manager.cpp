@@ -173,6 +173,8 @@ std::string PackageManager::architecture()
     }
 #if defined(__aarch64__) || defined(_M_ARM64)
     return "arm64";
+#elif defined(__riscv) && defined(__riscv_xlen) && __riscv_xlen == 64
+    return "riscv64";
 #elif defined(__x86_64__) || defined(_M_X64)
     return "amd64";
 #else
@@ -185,6 +187,10 @@ PackageOperationResult PackageManager::install(const std::string &package, const
     if (!valid_package_name(package) || release.status != "published" || release.size == 0 ||
         release.sha256.size() != 64)
         return {{}, "Invalid Registry package record", false};
+    const auto native_architecture = architecture();
+    if (native_architecture.empty()) return {{}, "Unable to determine the device package architecture", false};
+    if (release.architecture != native_architecture && release.architecture != "all")
+        return {{}, "Package architecture does not match the device", false};
     if (is_launcher_package(package) && !query(package).installed)
         return {{}, "A Launcher package with Store update support must be installed first", false};
     TemporaryPackage temporary;

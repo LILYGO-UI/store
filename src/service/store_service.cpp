@@ -340,11 +340,17 @@ std::filesystem::path image_cache_root(std::error_code &error)
 const RegistryRelease *select_release(const RegistryApplication &app, const std::string &architecture,
                                       const std::string &appkit_version)
 {
-    const auto found = std::find_if(app.releases.cbegin(), app.releases.cend(), [&](const auto &release) {
-        return release.status == "published" && release.architecture == architecture &&
-               (appkit_version.empty() || debian_version_compare(release.min_appkit_version, appkit_version) <= 0);
-    });
-    return found == app.releases.cend() ? nullptr : &*found;
+    const RegistryRelease *selected = nullptr;
+    for (const auto &release : app.releases) {
+        if (release.status != "published" || (release.architecture != architecture && release.architecture != "all") ||
+            (!appkit_version.empty() && debian_version_compare(release.min_appkit_version, appkit_version) > 0))
+            continue;
+        const auto comparison = selected ? debian_version_compare(release.version, selected->version) : 1;
+        if (comparison > 0 ||
+            (comparison == 0 && selected->architecture == "all" && release.architecture == architecture))
+            selected = &release;
+    }
+    return selected;
 }
 
 std::string configured_appkit_version(PackageManager &packages)
@@ -378,15 +384,21 @@ StoreRefreshResult StoreService::make_result(RegistryLoadResult loaded)
     result.root_document = std::move(loaded.root_document);
     result.apps.reserve(loaded.catalog.apps.size());
     for (const auto &registry_app : loaded.catalog.apps) {
+        const auto *release  = select_release(registry_app, architecture, appkit_version);
+        const auto installed = packages_.query(registry_app.package);
+        // Keep installed apps manageable even if their compatible release was withdrawn.
+        if (!release && !installed.installed) continue;
+
         StoreApp app;
-        app.id             = local_id(registry_app.package);
-        app.app_id         = registry_app.app_id;
-        app.package        = registry_app.package;
-        app.name           = registry_app.title;
-        app.summary        = registry_app.summary;
-        app.description    = registry_app.description;
-        app.author         = registry_app.authors.empty() ? std::string{} : registry_app.authors.front().name;
-        app.latest_version = registry_app.latest_version;
+        app.id          = local_id(registry_app.package);
+        app.app_id      = registry_app.app_id;
+        app.package     = registry_app.package;
+        app.name        = registry_app.title;
+        app.summary     = registry_app.summary;
+        app.description = registry_app.description;
+        app.author      = registry_app.authors.empty() ? std::string{} : registry_app.authors.front().name;
+        // The index's latest_version is global and may belong to another architecture.
+        app.latest_version = release ? release->version : installed.version;
         app.version        = app.latest_version;
         app.icon_url       = registry_app.icon_url;
         app.icon_cache_key = loaded.catalog.snapshot_id + ":" + app.icon_url;
@@ -401,8 +413,7 @@ StoreRefreshResult StoreService::make_result(RegistryLoadResult loaded)
             screenshot.cache_key = loaded.catalog.snapshot_id + ":" + registry_screenshot.url;
             app.screenshots.push_back(std::move(screenshot));
         }
-        const auto *release = select_release(registry_app, architecture, appkit_version);
-        app.available       = release != nullptr;
+        app.available = release != nullptr;
         if (release) {
             app.release        = *release;
             app.latest_version = release->version;
@@ -411,7 +422,6 @@ StoreRefreshResult StoreService::make_result(RegistryLoadResult loaded)
         } else {
             app.size = "Unavailable";
         }
-        const auto installed = packages_.query(app.package);
         if (installed.installed) {
             app.installed        = true;
             app.version          = installed.version;

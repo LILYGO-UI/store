@@ -427,6 +427,30 @@ void assert_detail_contract(lv_obj_t *host, StoreViewModel &store, const FontSet
     assert(lv_obj_get_child_count(host) == 0);
 }
 
+void assert_catalog_empty_after_remove(lv_obj_t *host, const FontSet &fonts)
+{
+    auto app             = make_long_copy_app();
+    app.available        = false;
+    app.update_available = false;
+    StoreViewModel store(StoreModel({app}));
+    CatalogViewModel view_model(store);
+    CatalogView view(view_model, {noop_event, noop_event, noop_event, noop_event, nullptr});
+    auto *surface = view.create(host);
+    assert(lv_obj_find_by_name(surface, app.id.c_str()));
+    assert(!lv_obj_find_by_name(surface, "catalog_empty_state"));
+
+    store.complete_remove(app.app_id);
+    lv_tick_inc(10);
+    lv_timer_handler();
+    lv_obj_update_layout(surface);
+    assert(!lv_obj_find_by_name(surface, app.id.c_str()));
+    auto *empty = lv_obj_find_by_name(surface, "catalog_empty_state");
+    assert(empty);
+    assert(assert_label_contract(empty, fonts) > 0);
+    view.destroy();
+    assert(lv_obj_get_child_count(host) == 0);
+}
+
 void verify_viewport(lv_display_t *display, int width, int height, const FontSet &fonts)
 {
     lv_obj_clean(lv_screen_active());
@@ -439,6 +463,7 @@ void verify_viewport(lv_display_t *display, int width, int height, const FontSet
     assert_catalog_contract(host, store, fonts);
     assert_installed_contract(host, store, fonts);
     assert_detail_contract(host, store, fonts);
+    assert_catalog_empty_after_remove(host, fonts);
     lv_obj_delete(host);
 }
 

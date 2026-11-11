@@ -74,6 +74,7 @@ std::size_t StoreModel::update_count() const noexcept
 
 bool StoreModel::matches_filter(const StoreApp &item) const noexcept
 {
+    if (!item.available && !item.installed) return false;
     if (filter_ == CatalogFilter::official) return item.official;
     if (filter_ == CatalogFilter::community) return !item.official;
     return true;

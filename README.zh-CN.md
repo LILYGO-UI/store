@@ -33,6 +33,12 @@ Store 会按 Registry 根地址缓存已验证的 `root.json`、索引和应用�
 目录；线上结果成功后再更新页面并原子发布新缓存。如果线上结果先完成，较旧的缓存结果
 不会覆盖页面。缓存不存在或损坏时直接忽略，不影响线上加载。
 
+目录按设备的 Debian 架构和 AppKit 版本选择最新的已发布兼容包：CM0 使用 `arm64`，
+K230 使用 `riscv64`，`all` 表示架构无关的通用包。版本按 Debian 规则比较，不直接采用
+可能属于其他架构的索引全局最新版本。没有兼容包且未安装的应用会被隐藏；已经安装的
+应用仍可管理和卸载，但不能安装或更新。下载前会再次检查包架构，提权安装程序还会
+核对实际 DEB 中的架构。
+
 安装和更新会从详情中的中央 GitHub Release 下载 `.deb`；官方内容寻址资产优先通过
 GitHub API 解析到资产下载端点，并在 API 不可用时回退 Registry 中的原始 URL。下载完成后
 严格核对文件大小和 SHA-256，再通过 `pkexec` 调用随包安装的
@@ -77,6 +83,9 @@ LILYGO_UI_STORE_REGISTRY_URL=https://mirror.example/v1/root.json \
 
 覆盖地址仍必须以 `/v1/root.json` 结尾，且生产网络请求只接受 HTTPS。`file://` 仅在根地址
 本身使用该协议时启用，用于离线渲染与协议 fixture 测试。
+
+模拟器可通过 `LILYGO_UI_STORE_ARCHITECTURE=arm64` 或 `riscv64` 预览对应设备的目录。
+设备默认通过 `dpkg --print-architecture` 识别架构，查询失败时回退到编译目标 CPU 架构。
 
 ## 构建和测试
 
@@ -131,3 +140,28 @@ git config core.hooksPath .githooks
 
 此后 `git commit` 会自动格式化并重新暂存本次提交中的 C/C++ 文件。为避免意外提交未暂存
 内容，hook 遇到部分暂存的文件时会终止提交；先暂存或储藏该文件的剩余改动后再提交。
+
+### 使用 LPM 构建 K230 Debian riscv64
+
+需要包含 K230 和 macOS LLVM 支持的 AppKit 源码 SDK。当前工作区可共用
+`../cm0-appkit`，准备一次 sysroot，再为本应用选择 SDK：
+
+```sh
+brew install llvm lld dpkg
+python3 ../cm0-appkit/tools/prepare-riscv64-sysroot.py
+cmake --preset k230-debian -DLilyGoUI_DIR="$PWD/../cm0-appkit"
+lpm pack --arch riscv64
+```
+
+输出为 `dist/<package>_<version>_riscv64.deb`。配置会记住 SDK 路径，后续运行
+`lpm pack --arch riscv64` 即可。支持保存目标的 LPM 版本也可先运行
+`lpm set-target k230`，之后只运行 `lpm pack`。
+`lpm pack --arch arm64` 构建原有 CM0 目标；两套 sysroot 都准备好后可运行
+`lpm pack --all-architectures`。
+
+独立检出时，请将 `third_party/cm0-appkit` 固定到包含这些功能的兼容发布版本，
+并在准备和配置命令中使用该目录。首次配置默认使用子模块，也可通过
+`LILYGO_UI_APPKIT_DIR` 环境变量指定 SDK。Linux 使用 `riscv64-linux-gnu-gcc/g++`
+交叉编译器和同一准备脚本。默认 sysroot 在所选 SDK 的
+`.cache/k230-debian/sysroot`，可用
+`-DLILYGO_UI_DEBIAN_SYSROOT=/path/to/sysroot` 覆盖。该 Debian 目标不能使用 Buildroot sysroot。

@@ -9,7 +9,7 @@ applications, and installing, updating, or removing packages.
 
 ## Features
 
-- Browse all applications and filter by Official or Community source
+- Browse applications compatible with the device and filter by Official or Community source
 - View application author, version, size, and description
 - Install applications and update those with newer versions
 - Automatically install Debian dependencies from the device's configured APT sources
@@ -34,6 +34,15 @@ by the root document, then reads the details for each application in that
 snapshot. The protocol version, snapshot, application identity, and digest fields
 must agree across the root document, index, and details. If any validation fails,
 the partial catalog is discarded.
+
+The catalog selects the newest published release compatible with the device's
+Debian architecture and AppKit version: `arm64` for CM0, `riscv64` for K230, or
+`all` for architecture-independent packages. Versions are compared using Debian
+version ordering; the index's global latest version may belong to another
+architecture. Applications without a compatible release are hidden unless they
+are already installed, in which case they remain available for management with
+installation and updates disabled. The package architecture is checked again
+before downloading and by the privileged installer against the actual DEB.
 
 The Store caches the verified `root.json`, index, and application detail
 documents by registry root URL. On subsequent starts, the cached snapshot is
@@ -108,6 +117,10 @@ The override URL must still end with `/v1/root.json`, and production network
 requests accept HTTPS only. The `file://` scheme is enabled only when the root URL
 itself uses that scheme, for offline rendering and protocol fixture tests.
 
+For simulator testing, set `LILYGO_UI_STORE_ARCHITECTURE=arm64` or `riscv64` to
+preview the corresponding device catalog. Devices normally use
+`dpkg --print-architecture`, with a compiled CPU architecture fallback.
+
 ## Build and Test
 
 Host builds require Git, CMake 3.21 or newer, a C++17-capable compiler, `make`,
@@ -164,3 +177,30 @@ Future `git commit` operations will automatically format and restage the C/C++
 files included in the commit. To avoid accidentally committing unstaged content,
 the hook aborts when it encounters a partially staged file; stage or stash the
 remaining changes in that file before committing.
+
+### K230 Debian riscv64 with LPM
+
+Use an AppKit source SDK containing K230 and macOS LLVM support. In this
+workspace, prepare the shared SDK once and select it for this application:
+
+```sh
+brew install llvm lld dpkg
+python3 ../cm0-appkit/tools/prepare-riscv64-sysroot.py
+cmake --preset k230-debian -DLilyGoUI_DIR="$PWD/../cm0-appkit"
+lpm pack --arch riscv64
+```
+
+The package is written to `dist/<package>_<version>_riscv64.deb`. The preset
+keeps the SDK selection; subsequent builds only need `lpm pack --arch riscv64`.
+With an LPM version supporting saved targets, run `lpm set-target k230` once
+and then use `lpm pack` directly. `lpm pack --arch arm64` selects the original
+CM0 build; `lpm pack --all-architectures` builds both when both sysroots are ready.
+
+For a standalone checkout, update the pinned `third_party/cm0-appkit` to a
+compatible published revision and use that SDK path instead of `../cm0-appkit`
+in both preparation and configuration commands. Fresh configurations default to
+the pinned SDK; `LILYGO_UI_APPKIT_DIR` can override that initial selection.
+On Linux, install `riscv64-linux-gnu-gcc/g++` and run the same preparation script.
+The default Debian development sysroot is `.cache/k230-debian/sysroot` inside
+the selected SDK; override it with `-DLILYGO_UI_DEBIAN_SYSROOT=/path/to/sysroot`.
+Buildroot sysroots are not compatible with this Debian target.

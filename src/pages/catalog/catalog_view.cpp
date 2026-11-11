@@ -156,12 +156,15 @@ void build_catalog_view(lv_obj_t *content, CatalogViewModel &view_model, const C
     lv_obj_set_style_pad_column(grid, 12, 0);
     lv_obj_set_style_pad_row(grid, 12, 0);
 
+    bool has_visible_apps = false;
     for (std::size_t index = 0; index < view_model.apps().size(); ++index) {
         const auto &app = view_model.apps()[index];
-        if (view_model.is_visible(app)) create_app_row(grid, index, app, callbacks);
+        if (!view_model.is_visible(app)) continue;
+        create_app_row(grid, index, app, callbacks);
+        has_visible_apps = true;
     }
 
-    if (view_model.registry_state() == RegistryState::ready && view_model.apps().empty()) {
+    if (view_model.registry_state() == RegistryState::ready && !has_visible_apps) {
         auto *empty = make_flex(body, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_name_static(empty, "catalog_empty_state");
         lv_obj_set_size(empty, LV_PCT(100), 180);
