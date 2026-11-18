@@ -42,12 +42,15 @@ struct StoreApp {
     std::vector<StoreScreenshot> screenshots;
     std::vector<RegistryPermission> permissions;
     RegistryRelease release;
+    std::vector<RegistryRelease> runtime_releases;
     bool official         = false;
     bool icon_loading     = false;
     bool installed        = false;
     bool update_available = false;
     bool available        = true;
     bool busy             = false;
+    bool runtime          = false;
+    bool catalogued       = true;
 };
 
 class StoreModel {
@@ -69,7 +72,7 @@ public:
 
     void set_filter(CatalogFilter filter) noexcept;
     bool select(std::size_t index) noexcept;
-    void begin_loading(std::string message = "Updating the app catalog...");
+    void begin_loading(std::string message = "Updating the package catalog...");
     void replace_catalog(std::vector<StoreApp> apps, std::string message = {});
     void set_registry_error(std::string error);
     void set_status_message(std::string message);
@@ -83,7 +86,7 @@ private:
     CatalogFilter filter_ = CatalogFilter::all;
     std::string selected_app_id_;
     RegistryState registry_state_ = RegistryState::loading;
-    std::string status_message_   = "Loading the app catalog...";
+    std::string status_message_   = "Loading the package catalog...";
 };
 
 #endif

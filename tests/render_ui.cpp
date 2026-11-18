@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "components/authentication_view.hpp"
 #include "domain/store_model.hpp"
 #include "pages/catalog/catalog_view.hpp"
 #include "pages/detail/detail_view.hpp"
@@ -183,22 +184,83 @@ RegistryFixturePaths prepare_registry_fixture(const char *output_path, int width
                         "\"published_at\":\"2026-08-31T12:00:00+08:00\"}]}";
     write_text(detail_path, detail);
 
-    const auto index = std::string("{") +
-                       "\"protocol_version\":1,"
-                       "\"snapshot_id\":\"" +
-                       snapshot +
-                       "\",\"generated_at\":\"2026-08-31T12:00:00+08:00\","
-                       "\"apps\":[{"
-                       "\"app_id\":\"cc.lilygo.ui.Demo\","
-                       "\"package\":\"lilygo-ui-demo\","
-                       "\"title\":\"File Manager\","
-                       "\"summary\":\"Browse, copy, and manage files on your device.\","
-                       "\"categories\":[\"Utilities\"],"
-                       "\"icon_url\":\"" +
-                       icon_url +
-                       "\",\"latest_version\":\"1.3.0\","
-                       "\"detail_url\":\"" +
-                       detail_url + "\"}]}";
+    auto index = std::string("{") +
+                 "\"protocol_version\":1,"
+                 "\"snapshot_id\":\"" +
+                 snapshot +
+                 "\",\"generated_at\":\"2026-08-31T12:00:00+08:00\","
+                 "\"apps\":[{"
+                 "\"app_id\":\"cc.lilygo.ui.Demo\","
+                 "\"package\":\"lilygo-ui-demo\","
+                 "\"title\":\"File Manager\","
+                 "\"summary\":\"Browse, copy, and manage files on your device.\","
+                 "\"categories\":[\"Utilities\"],"
+                 "\"icon_url\":\"" +
+                 icon_url +
+                 "\",\"latest_version\":\"1.3.0\","
+                 "\"detail_url\":\"" +
+                 detail_url + "\"}]}";
+
+    std::string runtime_summaries;
+    for (const auto &package :
+         {"lilygo-ui-appkit-dev", "lilygo-ui-mesa-vc4", "lilygo-new-runtime", "lilygo-riscv-runtime"}) {
+        const bool appkit  = std::string(package) == "lilygo-ui-appkit-dev";
+        const bool mesa    = std::string(package) == "lilygo-ui-mesa-vc4";
+        const bool foreign = std::string(package) == "lilygo-riscv-runtime";
+        const auto title   = appkit ? "AppKit" : (mesa ? "Mesa VC4" : (foreign ? "RISC-V runtime" : "New runtime"));
+        const auto version = appkit ? "0.1.2" : (mesa ? "26.2.0-2" : "1.0.0");
+        const auto runtime_path = snapshot_root / "runtimes" / (std::string(package) + ".json");
+        auto runtime_detail     = std::string(R"({"protocol_version":1,"package":")") + package + "\",\"title\":\"" +
+                              title + R"(","summary":"Shared runtime component",
+            "description":"Shared runtime component","authors":[{"name":"LILYGO","github":"LILYGO-UI"}],
+            "releases":[{"version":")" +
+                              version + R"(","architecture":"arm64","status":"published",
+            "size":7,"sha256":"239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5",
+            "url":")" + file_url(package_path) +
+                              R"(","published_at":"2026-11-17T12:00:00+08:00"}]})";
+        if (foreign) {
+            const auto architecture = runtime_detail.find("\"architecture\":\"arm64\"");
+            assert(architecture != std::string::npos);
+            runtime_detail.replace(architecture, std::string("\"architecture\":\"arm64\"").size(),
+                                   "\"architecture\":\"riscv64\"");
+        }
+        if (appkit) {
+            const auto older = std::string(R"(,{"version":"0.0.9","architecture":"all","status":"published",
+                "size":7,"sha256":"239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5",
+                "url":")") + file_url(package_path) +
+                               R"(","published_at":"2026-10-17T12:00:00+08:00"})";
+            runtime_detail.insert(runtime_detail.rfind("]}"), older);
+        }
+        write_text(runtime_path, runtime_detail);
+        if (!runtime_summaries.empty()) runtime_summaries += ',';
+        runtime_summaries += std::string("{\"package\":\"") + package + "\",\"title\":\"" + title +
+                             R"(","summary":"Shared runtime component","latest_version":")" + version +
+                             "\",\"detail_url\":\"" + file_url(runtime_path) + "\",\"detail_sha256\":\"" +
+                             sha256(runtime_detail) + "\"}";
+    }
+    index.pop_back();
+    index += ",\"runtimes\":[" + runtime_summaries + "]}";
+    const auto query = root / "bin/dpkg-query";
+    write_text(query, R"(#!/bin/sh
+if [ "$1" = "--listfiles" ]; then
+  printf '/usr/share/doc/%s/README\n' "$2"
+  exit 0
+fi
+if [ "$3" = "lilygo-*" ]; then
+  printf 'lilygo-ui-appkit-dev\tii \t0.1.0\tShared fonts\nlilygo-ui-mesa-vc4\tii \t26.2.0-2\tGraphics runtime\n'
+  exit 0
+fi
+for package do :; done
+case "$package" in
+  lilygo-ui-appkit-dev) printf 'ii \t0.1.0\n' ;;
+  lilygo-ui-mesa-vc4) printf 'ii \t26.2.0-2\n' ;;
+  *) exit 1 ;;
+esac
+)");
+    std::filesystem::permissions(query, std::filesystem::perms::owner_all);
+    const auto path =
+        query.parent_path().string() + ":" + (std::getenv("PATH") ? std::getenv("PATH") : "/usr/bin:/bin");
+    setenv("PATH", path.c_str(), 1);
     write_text(index_path, index);
     return {icon_path, publish_registry_root(root, snapshot, index_path, index)};
 }
@@ -406,7 +468,7 @@ void assert_initial_layout(int width, int height)
     assert(body_bounds.y1 == content_bounds.y1);
     assert(lv_color_eq(lv_obj_get_style_bg_color(surface, LV_PART_MAIN), lv_color_hex(kSurface)));
     assert(lv_color_eq(lv_obj_get_style_bg_color(navigation, LV_PART_MAIN), lv_color_hex(kSurface)));
-    assert(lv_obj_get_child_count(navigation) == 2);
+    assert(lv_obj_get_child_count(navigation) == 3);
     assert(lv_obj_get_child_count(filter) == 3);
     assert(button_text(lv_obj_get_child(filter, 0)) == "All");
     assert(button_text(lv_obj_get_child(filter, 1)) == "Official");
@@ -972,6 +1034,295 @@ void exercise_list_scroll_restoration(const cm0_app_descriptor_t *descriptor, co
     descriptor->close();
 }
 
+void exercise_runtime_views(lv_display_t *display, const char *output_path, int width, int height)
+{
+    auto *root       = lv_screen_active();
+    auto *navigation = lv_obj_find_by_name(root, "navigation_runtime");
+    assert(navigation);
+    lv_obj_send_event(navigation, LV_EVENT_CLICKED, nullptr);
+    settle_ui(root);
+    assert(lv_obj_find_by_name(root, "runtime_page"));
+    assert(lv_obj_find_by_name(root, "runtime_check_updates"));
+    assert(!lv_obj_find_by_name(root, "source_filter"));
+    assert_responsive_shell_layout(width, height);
+    auto *actual_runtime = lv_obj_find_by_name(root, "appkit-dev");
+    assert(actual_runtime);
+    assert(button_text(lv_obj_find_by_name(actual_runtime, "runtime_update_action")) == "Update");
+    auto *grid = lv_obj_find_by_name(root, "catalog_grid");
+    assert(grid && lv_obj_get_child_count(grid) == 4);
+    assert(button_text(lv_obj_find_by_name(lv_obj_find_by_name(root, "lilygo-new-runtime"), "runtime_update_action")) ==
+           "Install");
+    auto *foreign_action =
+        lv_obj_find_by_name(lv_obj_find_by_name(root, "lilygo-riscv-runtime"), "runtime_update_action");
+    assert(foreign_action && !lv_obj_has_flag(foreign_action, LV_OBJ_FLAG_CLICKABLE));
+    if (width >= 1024) assert(lv_obj_get_width(actual_runtime) < lv_obj_get_content_width(grid));
+    write_stage(display, output_path, "-runtime", width, height);
+    lv_obj_send_event(actual_runtime, LV_EVENT_CLICKED, nullptr);
+    settle_ui(root);
+    assert(lv_obj_find_by_name(root, "runtime_versions"));
+    assert(!lv_obj_find_by_name(root, "remove_action"));
+    auto *history  = lv_obj_find_by_name(root, "runtime_version_history");
+    auto *previous = lv_obj_find_by_name(history, "runtime_version:0.0.9");
+    auto *rollback = lv_obj_find_by_name(previous, "runtime_version_action");
+    assert(rollback && button_text(rollback) == "Roll back");
+    lv_obj_scroll_to_view(rollback, LV_ANIM_OFF);
+    settle_ui(root);
+    write_stage(display, output_path, "-runtime-versions", width, height);
+    press_and_click(rollback);
+    settle_ui(root);
+    assert(lv_obj_find_by_name(root, "runtime_rollback_dialog"));
+    assert(lv_obj_has_flag(lv_obj_find_by_name(root, "app_content"), LV_OBJ_FLAG_HIDDEN));
+    auto *cancel  = lv_obj_find_by_name(root, "runtime_rollback_cancel");
+    auto *confirm = lv_obj_find_by_name(root, "runtime_rollback_confirm");
+    assert(cancel && confirm);
+    auto *group = lv_group_get_default();
+    assert(lv_group_get_focused(group) == cancel);
+    lv_group_focus_next(group);
+    assert(lv_group_get_focused(group) == confirm);
+    lv_group_focus_next(group);
+    assert(lv_group_get_focused(group) == cancel);
+    write_stage(display, output_path, "-runtime-rollback", width, height);
+    // A revision can replace the hidden version buttons while confirmation is
+    // open. Restoring focus must use the version identity, never the old pointer.
+    lv_obj_delete(rollback);
+    rollback = lv_button_create(previous);
+    lv_obj_set_name_static(rollback, "runtime_version_action");
+    lv_obj_set_size(rollback, 96, 44);
+    lv_obj_send_event(cancel, LV_EVENT_CLICKED, nullptr);
+    assert(lv_obj_is_valid(cancel));
+    settle_ui(root);
+    assert(!lv_obj_find_by_name(root, "runtime_rollback_dialog"));
+    assert(!lv_obj_has_flag(lv_obj_find_by_name(root, "app_content"), LV_OBJ_FLAG_HIDDEN));
+    assert(lv_group_get_focused(group) == rollback);
+    lv_obj_send_event(lv_obj_find_by_name(root, "back_button"), LV_EVENT_CLICKED, nullptr);
+    settle_ui(root);
+    assert(lv_obj_find_by_name(root, "runtime_page"));
+
+    auto runtime           = make_probe_app("appkit-dev", true, true, "");
+    runtime.runtime        = true;
+    runtime.name           = "AppKit";
+    runtime.package        = "lilygo-ui-appkit-dev";
+    runtime.app_id         = "runtime:" + runtime.package;
+    runtime.summary        = "Shared fonts and application SDK";
+    runtime.author         = "LILYGO";
+    runtime.version        = "0.1.0";
+    runtime.latest_version = "0.1.2";
+    auto current           = make_probe_app("mesa-vc4", true, false, "");
+    current.runtime        = true;
+    current.name           = "Mesa VC4";
+    current.package        = "lilygo-ui-mesa-vc4";
+    current.version = current.latest_version = "2.8.0.0~local4528018+lr2021cad1";
+    auto missing                             = make_probe_app("missing-runtime", false, false, "");
+    missing.runtime                          = true;
+    StoreViewModel store(StoreModel({runtime, current, missing, make_probe_app("ordinary-app", true, true, "")}));
+    CatalogViewModel model(store, true);
+    CatalogView view(model, {noop_event, noop_event, nullptr, noop_event, nullptr});
+
+    auto *content = lv_obj_find_by_name(root, "app_content");
+    lv_area_t bounds{};
+    lv_obj_get_coords(content, &bounds);
+    auto *probe = lv_obj_create(lv_layer_top());
+    lv_obj_set_pos(probe, bounds.x1, bounds.y1);
+    lv_obj_set_size(probe, lv_obj_get_width(content), lv_obj_get_height(content));
+    lv_obj_set_style_pad_all(probe, 0, 0);
+    lv_obj_set_style_border_width(probe, 0, 0);
+    lv_obj_set_style_radius(probe, 0, 0);
+    lv_obj_set_style_bg_color(probe, lv_color_hex(0xF2F2F7), 0);
+    lv_obj_set_flex_flow(probe, LV_FLEX_FLOW_COLUMN);
+    view.create(probe);
+    settle_ui(probe);
+    assert(!lv_obj_find_by_name(probe, "source_filter"));
+    assert(lv_obj_find_by_name(probe, "missing-runtime"));
+    assert(button_text(lv_obj_find_by_name(lv_obj_find_by_name(probe, "missing-runtime"), "runtime_update_action")) ==
+           "Install");
+    assert(!lv_obj_find_by_name(probe, "ordinary-app"));
+    auto *row    = lv_obj_find_by_name(probe, "appkit-dev");
+    auto *update = lv_obj_find_by_name(row, "runtime_update_action");
+    assert(update && button_text(update) == "Update" && lv_obj_has_flag(update, LV_OBJ_FLAG_CLICKABLE));
+    assert(lv_obj_get_height(update) >= 44);
+    lv_area_t row_bounds{}, action_bounds{};
+    lv_obj_get_coords(row, &row_bounds);
+    lv_obj_get_coords(update, &action_bounds);
+    assert(action_bounds.x1 >= row_bounds.x1 && action_bounds.x2 <= row_bounds.x2);
+    auto *current_row    = lv_obj_find_by_name(probe, "mesa-vc4");
+    auto *current_action = lv_obj_find_by_name(current_row, "runtime_update_action");
+    assert(button_text(current_action) == "Up to date");
+    assert(!lv_obj_has_flag(current_action, LV_OBJ_FLAG_CLICKABLE));
+    write_stage(display, output_path, "-runtime-probe", width, height);
+
+    assert(store.begin_install(0, false, false));
+    settle_ui(probe);
+    update = lv_obj_find_by_name(lv_obj_find_by_name(probe, "appkit-dev"), "runtime_update_action");
+    assert(button_text(update) == "Working" && !lv_obj_has_flag(update, LV_OBJ_FLAG_CLICKABLE));
+    store.fail_operation(runtime.app_id, "Unable to download runtime. Check your connection and try again.");
+    settle_ui(probe);
+    update = lv_obj_find_by_name(lv_obj_find_by_name(probe, "appkit-dev"), "runtime_update_action");
+    assert(button_text(update) == "Update" && lv_obj_has_flag(update, LV_OBJ_FLAG_CLICKABLE));
+    view.destroy();
+    assert(store.select(0));
+    DetailViewModel detail_model(store);
+    DetailView detail(detail_model, {noop_event, noop_event, noop_event, nullptr});
+    detail.create(probe);
+    settle_ui(probe);
+    assert(lv_obj_find_by_name(probe, "runtime_versions"));
+    assert(lv_obj_find_by_name(probe, "operation_error"));
+    assert(!lv_obj_find_by_name(probe, "remove_action"));
+    assert(!lv_obj_find_by_name(probe, "preview_section"));
+    assert(!lv_obj_find_by_name(probe, "permission_summary"));
+    assert(button_text(lv_obj_find_by_name(probe, "primary_action")) == "Update Runtime");
+    write_stage(display, output_path, "-runtime-detail", width, height);
+    detail.destroy();
+    detail.destroy();
+    view.destroy();
+    lv_obj_delete(probe);
+    lv_obj_send_event(lv_obj_find_by_name(root, "navigation_store"), LV_EVENT_CLICKED, nullptr);
+    settle_ui(root);
+    assert(lv_obj_find_by_name(root, "catalog_page"));
+}
+
+void exercise_runtime_local_discovery(const cm0_app_descriptor_t *descriptor, const cm0_app_context_t &context,
+                                      lv_display_t *display, const char *output_path, int width, int height)
+{
+    descriptor->close();
+    const auto fixture    = prepare_registry_fixture(output_path, width, height);
+    const auto root       = fixture.root.parent_path().parent_path();
+    const auto index_path = root / "v1/snapshots/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.json";
+    std::ifstream input(index_path);
+    std::string index{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    const auto runtimes = index.find(",\"runtimes\":");
+    assert(runtimes != std::string::npos);
+    index.erase(runtimes);
+    index += '}';
+    write_text(index_path, index);
+    publish_registry_root(root, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", index_path, index);
+    write_text(root / "bin/dpkg-query", R"(#!/bin/sh
+if [ "$1" = "--listfiles" ]; then
+  if [ "$2" = "lilygo-ui-calculator" ]; then
+    printf '/usr/share/launcher/apps/cc.lilygo.ui.Calculator.json\n'
+  else
+    printf '/usr/share/doc/%s/README\n' "$2"
+  fi
+  exit 0
+fi
+if [ "$3" = "lilygo-*" ]; then
+  printf 'lilygo-ui-appkit-dev\tii \t0.1.1\tShared fonts\nlilygo-ui-mesa-vc4\tii \t26.2.0-2\tGraphics runtime\nmeshtasticd\tii \t2.8.0.0+lilygo1\tRadio service\nlilygo-t-display-cm0-overlay\tii \t1.0.0-1\tT-DisplayCM0 board overlay\nlilygo-ui-calculator\tii \t0.1.1\tCalculator application\n'
+  exit 0
+fi
+for package do :; done
+case "$package" in
+  lilygo-ui-appkit-dev) printf 'ii \t0.1.1\n' ;;
+  lilygo-ui-mesa-vc4) printf 'ii \t26.2.0-2\n' ;;
+  meshtasticd) printf 'ii \t2.8.0.0+lilygo1\n' ;;
+  *) exit 1 ;;
+esac
+)");
+    for (const bool offline : {false, true}) {
+        if (offline) setenv("LILYGO_UI_STORE_REGISTRY_URL", file_url(root / "missing/v1/root.json").c_str(), 1);
+        descriptor->open(&context);
+        settle_ui(context.root);
+        lv_obj_send_event(lv_obj_find_by_name(context.root, "navigation_runtime"), LV_EVENT_CLICKED, nullptr);
+        // Package queries and Registry loading use real worker threads; advancing
+        // LVGL ticks alone does not give those subprocesses time to finish.
+        for (int attempt = 0; attempt < 250; ++attempt) {
+            lv_tick_inc(10);
+            lv_timer_handler();
+            const bool loaded  = lv_obj_find_by_name(context.root, "meshtasticd");
+            const bool settled = offline ? lv_obj_find_by_name(context.root, "registry_retry") != nullptr
+                                         : lv_obj_find_by_name(context.root, "registry_status") == nullptr;
+            if (loaded && settled) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        assert(lv_obj_find_by_name(context.root, "meshtasticd"));
+        if (offline) assert(lv_obj_find_by_name(context.root, "registry_retry"));
+        settle_ui(context.root);
+        assert(lv_obj_find_by_name(context.root, "runtime_catalog_notice"));
+        for (const auto *name : {"appkit-dev", "mesa-vc4", "meshtasticd", "lilygo-t-display-cm0-overlay"}) {
+            auto *row = lv_obj_find_by_name(context.root, name);
+            assert(row);
+            auto *action = lv_obj_find_by_name(row, "runtime_update_action");
+            assert(action && !lv_obj_has_flag(action, LV_OBJ_FLAG_CLICKABLE));
+            assert(button_text(action) == "Unknown");
+        }
+        assert(!lv_obj_find_by_name(context.root, "calculator"));
+        write_stage(display, output_path, offline ? "-runtime-offline" : "-runtime-local", width, height);
+        lv_obj_send_event(lv_obj_find_by_name(context.root, "appkit-dev"), LV_EVENT_CLICKED, nullptr);
+        settle_ui(context.root);
+        assert(button_text(lv_obj_find_by_name(context.root, "primary_action")) == "Updates Unavailable");
+        assert(!lv_obj_find_by_name(context.root, "remove_action"));
+        descriptor->close();
+    }
+}
+
+void exercise_authentication(lv_obj_t *parent, lv_display_t *display, const char *output, int width, int height)
+{
+    std::uint64_t answered  = 0;
+    std::uint64_t cancelled = 0;
+    int replies             = 0;
+    AuthenticationView view(
+        [&](std::uint64_t id, const std::string &response) {
+            assert(response == "test-only-response");
+            answered = id;
+            ++replies;
+        },
+        [&](std::uint64_t id) { cancelled = id; });
+    AuthenticationPrompt prompt;
+    prompt.id       = 42;
+    prompt.message  = "Authentication is required to install software.";
+    prompt.identity = "wing";
+    prompt.prompt   = "Password:";
+    view.show(parent, prompt);
+    settle_ui(parent);
+    auto *dialog   = lv_obj_find_by_name(parent, "authentication_dialog");
+    auto *entry    = lv_obj_find_by_name(parent, "authentication_entry");
+    auto *submit   = lv_obj_find_by_name(parent, "authentication_submit");
+    auto *cancel   = lv_obj_find_by_name(parent, "authentication_cancel");
+    auto *keyboard = lv_obj_find_by_name(parent, "authentication_keyboard");
+    assert(dialog && entry && submit && cancel && keyboard);
+    assert(lv_obj_get_parent(dialog) == parent);
+    assert(lv_textarea_get_password_mode(entry));
+    assert(lv_obj_get_height(submit) >= 44 && lv_obj_get_height(cancel) >= 44);
+    lv_area_t area{};
+    lv_obj_get_coords(submit, &area);
+    assert(area.x1 >= 0 && area.x2 < width && area.y1 >= 0 && area.y2 < height);
+    write_stage(display, output, "-authentication", width, height);
+
+    lv_textarea_set_text(entry, "test-only-response");
+    lv_obj_send_event(submit, LV_EVENT_CLICKED, nullptr);
+    assert(answered == 42 && replies == 1);
+    assert(std::string(lv_textarea_get_text(entry)).empty());
+    assert(lv_obj_has_state(submit, LV_STATE_DISABLED));
+    lv_obj_send_event(submit, LV_EVENT_CLICKED, nullptr);
+    assert(replies == 1);
+    prompt.awaiting_response = false;
+    prompt.prompt            = "Checking credentials...";
+    view.show(parent, prompt);
+    assert(lv_obj_has_state(entry, LV_STATE_DISABLED));
+    prompt.awaiting_response = true;
+    prompt.id                = 43;
+    prompt.prompt            = "Password:";
+    prompt.error             = "Authentication failed. Please try again.";
+    view.show(parent, prompt);
+    assert(!lv_obj_has_state(submit, LV_STATE_DISABLED));
+    assert(std::string(lv_textarea_get_text(entry)).empty());
+    lv_textarea_set_text(entry, "test-only-response");
+    // Resizing the existing modal must preserve the pending request and input.
+    lv_obj_set_width(dialog, LV_PCT(90));
+    settle_ui(parent);
+    lv_obj_set_width(dialog, LV_PCT(100));
+    settle_ui(parent);
+    assert(lv_obj_find_by_name(parent, "authentication_entry") == entry);
+    assert(std::string(lv_textarea_get_text(entry)) == "test-only-response");
+    lv_obj_send_event(cancel, LV_EVENT_CLICKED, nullptr);
+    assert(cancelled == 43 && std::string(lv_textarea_get_text(entry)).empty());
+    view.destroy();
+    view.destroy();
+    assert(!view.visible() && !lv_obj_find_by_name(parent, "authentication_dialog"));
+    view.show(parent, prompt);
+    // Parent-driven deletion must also invalidate cached pointers.
+    lv_obj_delete(lv_obj_find_by_name(parent, "authentication_dialog"));
+    view.destroy();
+}
+
 }  // namespace
 
 int main(int argc, char **argv)
@@ -1015,12 +1366,15 @@ int main(int argc, char **argv)
 
     exercise_store_workflow(display, argv[3], width, height);
     assert_action_labels(fixture.icon.string());
+    exercise_runtime_views(display, argv[3], width, height);
 
     if (width == 568 && height == 1232) {
         exercise_cached_catalog_fallback(descriptor, context, fixture.root);
         exercise_app_lifecycle(descriptor, context);
     }
     exercise_list_scroll_restoration(descriptor, context, argv[3], width, height);
+    exercise_runtime_local_discovery(descriptor, context, display, argv[3], width, height);
+    exercise_authentication(context.root, display, argv[3], width, height);
     lv_group_set_default(nullptr);
     lv_group_delete(input_group);
     lv_display_delete(display);

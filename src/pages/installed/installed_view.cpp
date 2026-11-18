@@ -145,7 +145,7 @@ void build_installed_view(lv_obj_t *content, InstalledViewModel &view_model, con
 
     for (std::size_t index = 0; index < view_model.apps().size(); ++index) {
         const auto &app = view_model.apps()[index];
-        if (app.installed) create_installed_row(body, index, app, callbacks);
+        if (app.installed && !app.runtime) create_installed_row(body, index, app, callbacks);
     }
 
     if (view_model.installed_count() == 0) {

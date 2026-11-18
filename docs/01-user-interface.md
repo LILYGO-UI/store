@@ -11,7 +11,9 @@
 ## 架构边界
 
 现有页面位于 `src/pages/catalog/`、`src/pages/detail/` 和 `src/pages/installed/`。
-各页面的 ViewModel 通过共享 `StoreViewModel` 读取展示状态并提交命令，View 负责
+Runtime 导航复用 `catalog` 的 View/ViewModel，使用独立实例显示全部已发布 runtime
+目录条目及本地系统组件；未安装及不兼容条目也需展示对应状态。详情页根据条目类型
+提供兼容版本选择、安装、更新及带确认的回退操作。各页面的 ViewModel 通过共享 `StoreViewModel` 读取展示状态并提交命令，View 负责
 LVGL 对象创建、布局、事件转发和绑定，不得直接修改 Model 或执行网络、包管理操作。
 
 页面私有状态按需与 ViewModel/View 放在同一目录；跨页面业务规则放在 `src/domain/`，

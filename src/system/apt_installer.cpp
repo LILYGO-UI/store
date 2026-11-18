@@ -1,4 +1,5 @@
 #include "system/apt_installer.hpp"
+#include "system/package_name.hpp"
 
 #include "registry/sha256.hpp"
 
@@ -107,25 +108,6 @@ private:
     std::filesystem::path directory_;
     std::filesystem::path path_;
 };
-
-bool valid_package_name(const std::string &value)
-{
-    constexpr std::string_view prefix = "lilygo-ui-";
-    if (value.rfind(prefix, 0) != 0 || value.size() == prefix.size()) return false;
-    bool after_separator = true;
-    for (std::size_t index = prefix.size(); index < value.size(); ++index) {
-        const char character = value[index];
-        if (character == '-') {
-            if (after_separator) return false;
-            after_separator = true;
-        } else if ((character >= 'a' && character <= 'z') || (character >= '0' && character <= '9')) {
-            after_separator = false;
-        } else {
-            return false;
-        }
-    }
-    return !after_separator;
-}
 
 bool valid_version(const std::string &value)
 {
@@ -290,8 +272,8 @@ std::vector<std::string> apt_operation(const char *operation)
 
 AptInstallResult install_debian_package(ProcessRunner &runner, const AptInstallRequest &request)
 {
-    if (!valid_package_name(request.package) || !valid_version(request.version) || !valid_digest(request.sha256) ||
-        !request.path.is_absolute())
+    if (!valid_debian_package_name(request.package) || !valid_version(request.version) ||
+        !valid_digest(request.sha256) || !request.path.is_absolute())
         return {"Invalid package installation request"};
 
     StagedPackage staged;
@@ -366,6 +348,7 @@ AptInstallResult install_debian_package(ProcessRunner &runner, const AptInstallR
             if (!trimmed(filtered).empty()) operation.push_back("Conflicts: " + filtered);
         }
     } else {
+        if (request.allow_downgrade) operation.insert(operation.begin() + 1, "--allow-downgrades");
         operation.push_back(staged.path().string());
     }
 

@@ -11,6 +11,7 @@ struct AptInstallRequest {
     std::string version;
     std::string sha256;
     std::filesystem::path path;
+    bool allow_downgrade = false;
 };
 
 struct AptInstallResult {

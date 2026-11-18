@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -253,6 +254,9 @@ public:
 class FakeProcessRunner final : public ProcessRunner {
 public:
     std::map<std::string, std::string> installed;
+    std::map<std::string, std::string> installed_files;
+    int inventory_exit_code = 0;
+    std::string inventory_override;
     std::vector<std::vector<std::string>> calls;
     std::string install_package = "lilygo-ui-demo";
     std::string install_version = "1.2.3";
@@ -267,6 +271,20 @@ public:
         if (arguments.size() >= 2 && arguments[0] == "dpkg" && arguments[1] == "--print-architecture")
             return architecture_result;
         if (!arguments.empty() && arguments[0] == "dpkg-query") {
+            if (arguments.size() == 5 && arguments[3] == "lilygo-*") {
+                std::string output;
+                for (const auto &entry : installed)
+                    output += entry.first + "\t" + installed_status + "\t" + entry.second + "\tInstalled component\n";
+                return {inventory_exit_code, inventory_override.empty() ? output : inventory_override, {}, false};
+            }
+            if (arguments.size() == 3 && arguments[1] == "--listfiles") {
+                const auto files = installed_files.find(arguments.back());
+                if (files != installed_files.end()) return {0, files->second, {}, false};
+                const auto &package = arguments.back();
+                if (package == "lilygo-ui-appkit-dev" || package == "lilygo-ui-mesa-vc4" || package == "meshtasticd")
+                    return {0, "/usr/share/doc/" + package + "/README\n", {}, false};
+                return {0, "/usr/share/launcher/apps/" + package + ".json\n", {}, false};
+            }
             const auto found = installed.find(arguments.back());
             if (found == installed.end()) return {1, {}, "not installed", false};
             return {0, installed_status + "\t" + found->second, {}, false};
@@ -318,6 +336,10 @@ void test_router()
     assert(router.detail_origin() == StorePage::installed);
     assert(router.back());
     assert(router.page() == StorePage::installed);
+    router.show_runtimes();
+    router.show_detail();
+    assert(router.detail_origin() == StorePage::runtimes);
+    assert(router.back() && router.page() == StorePage::runtimes);
     assert(!router.back());
 }
 
@@ -348,6 +370,35 @@ void test_model()
     assert(model.selected_app() && model.selected_app()->id == "demo");
     assert(model.remove(model.selected_index()));
     assert(!model.apps()[0].installed);
+}
+
+void test_runtime_model_install_and_rollback_results()
+{
+    auto runtime    = make_store_app("runtime-history");
+    runtime.runtime = true;
+    StoreModel model({runtime});
+    assert(model.install(0, "1.0.0"));
+    assert(model.app(0)->installed && model.app(0)->version == "1.0.0");
+    assert(model.app(0)->update_available);  // First install may deliberately choose an older published version.
+    assert(!model.install(0, "1.2.3"));
+    assert(model.update(0, "1.2.3"));
+    assert(!model.app(0)->update_available);
+    assert(model.update(0, "1.0.0"));  // A current runtime can be rolled back without an update badge.
+    assert(model.app(0)->version == "1.0.0" && model.app(0)->update_available);
+    assert(model.update(0, "1.3.0"));
+    assert(!model.app(0)->update_available);
+    assert(!model.remove(0));
+
+    auto application = make_store_app("application", true, false);
+    StoreModel ordinary({application});
+    assert(!ordinary.update(0, "0.9.0"));
+    assert(ordinary.app(0)->version == application.version);
+
+    runtime.latest_version.clear();
+    runtime.available = false;
+    StoreModel uncatalogued({runtime});
+    assert(uncatalogued.install(0, "1.0.0"));
+    assert(!uncatalogued.app(0)->update_available);
 }
 
 void test_json_sha_and_debian_versions()
@@ -477,7 +528,7 @@ void test_store_service_and_package_verification()
     StoreService service(registry, packages);
     const auto refreshed = service.refresh(fixture.root_url);
     assert(refreshed);
-    assert(refreshed.apps.size() == 1);
+    assert(refreshed.apps.size() == 2);
     assert(refreshed.apps.front().installed);
     assert(refreshed.apps.front().update_available);
     assert(refreshed.apps.front().release.version == "1.2.3");
@@ -502,14 +553,14 @@ void test_store_service_and_package_verification()
     StoreService community_service(community_registry, community_packages);
     const auto community_refreshed = community_service.refresh(community_fixture.root_url);
     assert(community_refreshed);
-    assert(community_refreshed.apps.size() == 1);
+    assert(community_refreshed.apps.size() == 2);
     assert(!community_refreshed.apps.front().official);
 
     auto traversal_fixture         = make_registry_fixture("https://github.com/LILYGO-UI/../attacker");
     community_http.documents       = traversal_fixture.documents;
     const auto traversal_refreshed = community_service.refresh(traversal_fixture.root_url);
     assert(traversal_refreshed);
-    assert(traversal_refreshed.apps.size() == 1);
+    assert(traversal_refreshed.apps.size() == 2);
     assert(!traversal_refreshed.apps.front().official);
 
     const auto installed = packages.install("lilygo-ui-demo", refreshed.apps.front().release);
@@ -532,13 +583,17 @@ void test_store_service_and_package_verification()
     auto bad_release                   = refreshed.apps.front().release;
     bad_release.sha256                 = std::string(64, '0');
     runner.installed["lilygo-ui-demo"] = "1.0.0";
-    const auto call_count              = runner.calls.size();
-    const auto rejected                = packages.install("lilygo-ui-demo", bad_release);
+    const auto read_only_package_query = [](const auto &arguments) {
+        return arguments == std::vector<std::string>{"dpkg", "--print-architecture"} ||
+               arguments == std::vector<std::string>{"dpkg-query", "--show",
+                                                     "--showformat=${db:Status-Abbrev}\t${Version}", "lilygo-ui-demo"};
+    };
+    const auto call_count = runner.calls.size();
+    const auto rejected   = packages.install("lilygo-ui-demo", bad_release);
     assert(!rejected);
     assert(rejected.error.find("SHA-256") != std::string::npos);
-    assert(std::all_of(runner.calls.cbegin() + call_count, runner.calls.cend(), [](const auto &arguments) {
-        return arguments == std::vector<std::string>{"dpkg", "--print-architecture"};
-    }));
+    assert(std::all_of(runner.calls.cbegin() + call_count, runner.calls.cend(), read_only_package_query));
+    assert(runner.installed.at("lilygo-ui-demo") == "1.0.0");
 
     auto wrong_size = refreshed.apps.front().release;
     wrong_size.size += 1;
@@ -546,9 +601,8 @@ void test_store_service_and_package_verification()
     const auto size_rejected   = packages.install("lilygo-ui-demo", wrong_size);
     assert(!size_rejected);
     assert(size_rejected.error.find("size") != std::string::npos);
-    assert(std::all_of(runner.calls.cbegin() + size_call_count, runner.calls.cend(), [](const auto &arguments) {
-        return arguments == std::vector<std::string>{"dpkg", "--print-architecture"};
-    }));
+    assert(std::all_of(runner.calls.cbegin() + size_call_count, runner.calls.cend(), read_only_package_query));
+    assert(runner.installed.at("lilygo-ui-demo") == "1.0.0");
 
     auto yanked   = refreshed.apps.front().release;
     yanked.status = "yanked";
@@ -584,6 +638,281 @@ void test_store_service_and_package_verification()
     assert(!packages.query("lilygo-ui-demo").installed);
 }
 
+void rehash_fixture(Fixture &fixture)
+{
+    const auto index_url = std::string(kBase) + "/v1/snapshots/" + kSnapshot + "/index.json";
+    auto &root           = fixture.documents[fixture.root_url];
+    const auto marker    = root.find("\"sha256\":\"");
+    assert(marker != std::string::npos);
+    root.replace(marker + 10, 64, sha256(fixture.documents[index_url]));
+}
+
+Fixture make_runtime_fixture(const std::vector<RegistryRelease> &releases)
+{
+    auto fixture           = make_registry_fixture("https://github.com/LILYGO-UI/demo", releases);
+    const auto base        = std::string(kBase) + "/v1/snapshots/" + kSnapshot;
+    const auto &app_detail = fixture.documents[base + "/apps/cc.lilygo.ui.Demo.json"];
+    auto release_json      = app_detail.substr(app_detail.find("\"releases\":"));
+    // A runtime has no minimum AppKit requirement, desktop ID, icon or screenshots.
+    for (const auto &release : releases) {
+        const auto field = ",\"min_appkit_version\":\"" + release.min_appkit_version + "\"";
+        const auto found = release_json.find(field);
+        assert(found != std::string::npos);
+        release_json.erase(found, field.size());
+    }
+    const auto detail = std::string(R"({"protocol_version":1,"package":"lilygo-ui-appkit-dev",
+        "title":"AppKit","summary":"Shared fonts","description":"Shared fonts and SDK",
+        "authors":[{"name":"LILYGO","github":"LILYGO-UI"}],)") +
+                        release_json;
+    const auto url         = base + "/runtimes/lilygo-ui-appkit-dev.json";
+    fixture.documents[url] = detail;
+    auto &index            = fixture.documents[base + "/index.json"];
+    // Reuse the global latest version from the application fixture.
+    const auto version_start = index.find("\"latest_version\":\"") + 18;
+    const auto latest        = index.substr(version_start, index.find('"', version_start) - version_start);
+    index.pop_back();
+    index += std::string(R"(,"runtimes":[{"package":"lilygo-ui-appkit-dev","title":"AppKit",
+        "summary":"Shared fonts","latest_version":")") +
+             latest + "\",\"detail_url\":\"" + url + "\",\"detail_sha256\":\"" + sha256(detail) + "\"}]}";
+    rehash_fixture(fixture);
+    return fixture;
+}
+
+void test_runtime_catalog_and_updates()
+{
+    const auto fixture = make_runtime_fixture(
+        {make_registry_release("0.2.0", "all"), make_registry_release("0.3.0", "arm64"),
+         make_registry_release("0.4.0", "riscv64"), make_registry_release("0.9.0", "arm64", "yanked"),
+         make_registry_release("0.8.0", "all", "revoked")});
+    FakeHttpClient http;
+    http.documents = fixture.documents;
+    RegistryClient registry(http);
+    const auto loaded = registry.load(fixture.root_url);
+    assert(loaded && loaded.catalog.apps.size() == 2);
+    assert(loaded.catalog.apps.back().runtime);
+    assert(loaded.catalog.apps.back().app_id == "runtime:lilygo-ui-appkit-dev");
+    assert(loaded.catalog.apps.back().releases.front().min_appkit_version.empty());
+    FakeProcessRunner runner;
+    runner.installed["lilygo-ui-appkit-dev"] = "0.1.0";
+    PackageManager packages(runner, http);
+    StoreService service(registry, packages);
+    for (const auto &architecture : {"arm64", "riscv64", "amd64"}) {
+        runner.architecture_result.output = std::string(architecture) + "\n";
+        const auto refreshed              = service.refresh(fixture.root_url);
+        assert(refreshed && refreshed.apps.size() == 2);
+        const auto &runtime = refreshed.apps.back();
+        assert(runtime.runtime && runtime.installed && runtime.update_available);
+        assert(runtime.version == "0.1.0");
+        const auto expected = std::string(architecture) == "arm64"
+                                  ? "0.3.0"
+                                  : (std::string(architecture) == "riscv64" ? "0.4.0" : "0.2.0");
+        assert(runtime.latest_version == expected);
+    }
+    runner.architecture_result.output        = "arm64\n";
+    runner.installed["lilygo-ui-appkit-dev"] = "0.5.0";
+    assert(!service.refresh(fixture.root_url).apps.back().update_available);
+    runner.installed["lilygo-ui-appkit-dev"] = "0.3.0";
+    assert(!service.refresh(fixture.root_url).apps.back().update_available);
+    runner.installed["lilygo-ui-appkit-dev"] = "0.1.0";
+    runner.install_package                   = "lilygo-ui-appkit-dev";
+    runner.install_version                   = "0.3.0";
+    const auto runtime                       = service.refresh(fixture.root_url).apps.back();
+    const auto updated                       = packages.install(runtime.package, runtime.release);
+    assert(updated && updated.installed_version == "0.3.0");
+    assert(runner.installed[runtime.package] == "0.3.0");
+
+    const auto detail_url = std::string(kBase) + "/v1/snapshots/" + kSnapshot + "/runtimes/lilygo-ui-appkit-dev.json";
+    http.documents[detail_url] += " ";
+    assert(registry.load(fixture.root_url).error.find("SHA-256 mismatch") != std::string::npos);
+    auto invalid = fixture;
+    auto &index  = invalid.documents[std::string(kBase) + "/v1/snapshots/" + kSnapshot + "/index.json"];
+    index.replace(index.find(detail_url), detail_url.size(), "https://elsewhere.test/runtime.json");
+    rehash_fixture(invalid);
+    http.documents = invalid.documents;
+    assert(registry.load(fixture.root_url).error.find("outside the current snapshot") != std::string::npos);
+
+    auto foreign           = make_runtime_fixture({make_registry_release("0.4.0", "riscv64")});
+    http.documents         = foreign.documents;
+    const auto unavailable = service.refresh(foreign.root_url);
+    assert(unavailable && unavailable.apps.size() == 1);
+    assert(unavailable.apps[0].runtime && unavailable.apps[0].installed && !unavailable.apps[0].available);
+    assert(!unavailable.apps[0].update_available);
+
+    // Runtime documents participate in the same complete offline snapshot cache.
+    const auto cache_path =
+        std::filesystem::temp_directory_path() / ("store-runtime-cache-" + std::to_string(getpid()));
+    ScopedEnvironmentVariable cache_home("XDG_CACHE_HOME", cache_path.c_str());
+    RegistryRootCache cache;
+    std::vector<RegistryCacheDocument> documents;
+    for (const auto &entry : fixture.documents) documents.push_back({entry.first, entry.second});
+    assert(cache.store(fixture.root_url, documents).empty());
+    FakeHttpClient cached_http;
+    for (const auto &entry : fixture.documents) {
+        const auto cached = cache.load_document(fixture.root_url, entry.first, 4 * 1024 * 1024);
+        assert(cached);
+        cached_http.documents[entry.first] = cached.document;
+    }
+    assert(RegistryClient(cached_http).load(fixture.root_url).catalog.apps.back().runtime);
+    std::filesystem::remove_all(cache_path);
+}
+
+void test_runtime_release_history_and_complete_catalog()
+{
+    std::vector<RegistryRelease> releases{
+        make_registry_release("1.9.0", "all"),
+        make_registry_release("1.10.0", "all"),
+        make_registry_release("1.10.0", "arm64"),
+        make_registry_release("1:1.0-1", "arm64", "published", "99.0"),
+        make_registry_release("2:1.0-1", "riscv64"),
+        make_registry_release("9:9.0", "arm64", "yanked"),
+        make_registry_release("8:8.0", "all", "revoked"),
+        make_registry_release("1.1", "all"),
+        make_registry_release("1.01", "arm64"),
+    };
+    ScopedEnvironmentVariable appkit_version("LILYGO_UI_APPKIT_VERSION", "0.1.0");
+    for (int order = 0; order < 2; ++order) {
+        const auto fixture = make_runtime_fixture(releases);
+        FakeHttpClient http;
+        http.documents = fixture.documents;
+        FakeProcessRunner runner;
+        RegistryClient registry(http);
+        PackageManager packages(runner, http);
+        StoreService service(registry, packages);
+        const auto result = service.refresh(fixture.root_url);
+        assert(result);
+        const auto runtime =
+            std::find_if(result.apps.begin(), result.apps.end(), [](const auto &app) { return app.runtime; });
+        assert(runtime != result.apps.end());
+        assert(!runtime->installed && runtime->available && runtime->catalogued);
+        assert(runtime->latest_version == "1:1.0-1");
+        assert(runtime->release.version == runtime->runtime_releases.front().version);
+        assert(runtime->runtime_releases.size() == 4);
+        const std::vector<std::string> expected{"1:1.0-1", "1.10.0", "1.9.0", "1.01"};
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            const auto &release = runtime->runtime_releases[index];
+            assert(release.version == expected[index] && release.status == "published");
+            assert(release.architecture == "arm64" || release.architecture == "all");
+        }
+        assert(runtime->runtime_releases[1].architecture == "arm64");
+        assert(runtime->runtime_releases[3].architecture == "arm64");
+
+        runner.installed["lilygo-ui-appkit-dev"] = "1.0.0";
+        const auto installed                     = service.refresh(fixture.root_url);
+        assert(installed);
+        assert(std::count_if(installed.apps.begin(), installed.apps.end(),
+                             [](const auto &app) { return app.package == "lilygo-ui-appkit-dev"; }) == 1);
+        const auto catalogued =
+            std::find_if(installed.apps.begin(), installed.apps.end(), [](const auto &app) { return app.runtime; });
+        assert(catalogued->installed && catalogued->catalogued && catalogued->name == "AppKit");
+        assert(catalogued->runtime_releases.size() == 4);
+        std::reverse(releases.begin(), releases.end());
+    }
+
+    const auto fixture = make_runtime_fixture({make_registry_release("4.0.0", "riscv64")});
+    FakeHttpClient http;
+    http.documents = fixture.documents;
+    FakeProcessRunner runner;
+    RegistryClient registry(http);
+    PackageManager packages(runner, http);
+    const auto incompatible = StoreService(registry, packages).refresh(fixture.root_url);
+    assert(incompatible && incompatible.apps.size() == 1);
+    const auto &runtime = incompatible.apps.front();
+    assert(runtime.runtime && runtime.catalogued && !runtime.installed && !runtime.available);
+    assert(runtime.runtime_releases.empty() && runtime.release.url.empty());
+}
+
+void test_local_runtimes_without_registry_metadata()
+{
+    const auto fixture = make_registry_fixture();  // Legacy app-only index, as deployed on Pages.
+    FakeHttpClient http;
+    http.documents = fixture.documents;
+    FakeProcessRunner runner;
+    runner.installed["lilygo-ui-appkit-dev"] = "0.1.1";
+    runner.installed["lilygo-ui-mesa-vc4"]   = "26.2.0-2";
+    runner.installed["meshtasticd"]          = "2.8.0.0+lilygo1";
+    RegistryClient registry(http);
+    PackageManager packages(runner, http);
+    StoreService service(registry, packages);
+    auto result = service.refresh(fixture.root_url);
+    assert(result && result.apps.size() == 4);
+    for (std::size_t index = 1; index < result.apps.size(); ++index) {
+        const auto &app = result.apps[index];
+        assert(app.runtime && app.installed && !app.catalogued && !app.available && !app.update_available);
+        assert(app.version == runner.installed[app.package]);
+        assert(app.latest_version.empty() && app.release.url.empty() && app.runtime_releases.empty());
+    }
+    assert(result.apps.back().package == "meshtasticd");
+    http.documents.clear();  // First launch offline, without any Registry cache.
+    result = service.refresh(fixture.root_url);
+    assert(!result && result.apps.size() == 3);
+    assert(result.apps.back().installed && result.apps.back().package == "meshtasticd");
+    runner.installed.erase("lilygo-ui-mesa-vc4");
+    result = service.refresh(fixture.root_url);
+    assert(!result && result.apps.size() == 2);
+    runner.installed_status = "rc ";
+    assert(service.refresh(fixture.root_url).apps.empty());
+
+    runner.installed_status = "ii ";
+    runner.install_package  = "meshtasticd";
+    runner.install_version  = "2.9.0";
+    assert(packages.query("meshtasticd").installed);
+    const auto updated = packages.install("meshtasticd", make_registry_release("2.9.0"));
+    assert(updated && updated.installed_version == "2.9.0");
+    for (const auto *invalid : {"--help", "foo;bar", "foo/bar", "foo bar", "foo*", "foo:arm64", "Foo"}) {
+        const auto count = runner.calls.size();
+        assert(!packages.query(invalid).error.empty());
+        assert(!packages.install(invalid, make_registry_release()));
+        assert(runner.calls.size() == count);
+    }
+}
+
+void test_runtime_inventory_detects_components_without_launchers()
+{
+    FakeHttpClient http;
+    FakeProcessRunner runner;
+    runner.installed = {{"lilygo-t-display-cm0-overlay", "1.0.0-1"},
+                        {"lilygo-future-runtime", "2.0"},
+                        {"meshtasticd", "2.8.0"},
+                        {"lilygo-ui-launcher", "1.0"},
+                        {"lilygo-ui-unlisted-app", "1.0"},
+                        {"lilygo-desktop-tool", "1.0"},
+                        {"libc6", "2.41"}};
+    runner.installed_files["lilygo-t-display-cm0-overlay"] =
+        "/usr/share/lilygo-t-display-cm0-overlay/release.json\n/usr/share/lilygo-t-display-cm0-overlay/"
+        "t-display-cm0.dtbo\n";
+    runner.installed_files["lilygo-future-runtime"] = "/usr/lib/lilygo-future-runtime/libfuture.so\n";
+    runner.installed_files["lilygo-desktop-tool"]   = "/usr/share/applications/tool.desktop\n";
+    PackageManager packages(runner, http);
+    const auto runtimes = packages.installed_runtimes();
+    assert(runtimes.size() == 3);
+    assert(std::any_of(runtimes.begin(), runtimes.end(), [](const auto &item) {
+        return item.package == "lilygo-t-display-cm0-overlay" && item.version == "1.0.0-1";
+    }));
+    RegistryClient registry(http);
+    auto offline = StoreService(registry, packages).refresh(kDefaultRegistryRoot);
+    assert(!offline && offline.apps.size() == 3);
+    for (const auto &item : offline.apps) assert(item.runtime && item.installed && !item.catalogued && !item.available);
+    runner.installed.erase("meshtasticd");
+    runner.inventory_exit_code = 1;  // An unmatched external package must not hide LILYGO components.
+    assert(packages.installed_runtimes().size() == 2);
+    runner.installed_status = "hi ";
+    assert(packages.installed_runtimes().size() == 2);
+    runner.installed_status = "rc ";
+    assert(packages.installed_runtimes().empty());
+    runner.installed_status = "iU ";
+    assert(packages.installed_runtimes().empty());
+    runner.installed_status    = "ii ";
+    runner.inventory_exit_code = 2;
+    assert(packages.installed_runtimes().empty());
+    runner.inventory_exit_code = 0;
+    runner.inventory_override =
+        "lilygo-future-runtime\tii \t2.0\tFuture\n"
+        "lilygo-future-runtime\tii \t2.0\tDuplicate\n"
+        "--help\tii \t1.0\tInvalid\n"
+        "libc6\tii \t2.41\tUnrelated system package\n";
+    assert(packages.installed_runtimes().size() == 1);
+}
+
 void test_store_architecture_selection()
 {
     const auto refresh = [](const std::vector<RegistryRelease> &releases, const std::string &architecture,
@@ -610,7 +939,7 @@ void test_store_architecture_selection()
         };
         for (int order = 0; order < 2; ++order) {
             const auto result = refresh(mixed, architecture, "1:1.0-1");
-            assert(result && result.apps.size() == 1);
+            assert(result && result.apps.size() == 2);
             const auto &app = result.apps.front();
             assert(app.available && app.installed && app.update_available);
             assert(app.version == "1:1.0-1");
@@ -622,18 +951,18 @@ void test_store_architecture_selection()
         }
 
         const auto up_to_date = refresh(mixed, architecture, "1:1.0-2");
-        assert(up_to_date && up_to_date.apps.size() == 1);
+        assert(up_to_date && up_to_date.apps.size() == 2);
         assert(!up_to_date.apps.front().update_available);
         assert(up_to_date.apps.front().latest_version == "1:1.0-2");
 
         const auto universal = refresh({make_registry_release("1.2.3", "all")}, architecture);
-        assert(universal && universal.apps.size() == 1);
+        assert(universal && universal.apps.size() == 2);
         assert(universal.apps.front().available);
         assert(universal.apps.front().release.architecture == "all");
 
         const auto newer_universal = refresh(
             {make_registry_release("1.0.0", architecture), make_registry_release("2.0.0", "all")}, architecture);
-        assert(newer_universal && newer_universal.apps.size() == 1);
+        assert(newer_universal && newer_universal.apps.size() == 2);
         assert(newer_universal.apps.front().latest_version == "2.0.0");
         assert(newer_universal.apps.front().release.architecture == "all");
 
@@ -641,7 +970,7 @@ void test_store_architecture_selection()
                                           make_registry_release("1.2.3", architecture)};
         for (int order = 0; order < 2; ++order) {
             const auto preferred_native = refresh(tied, architecture);
-            assert(preferred_native && preferred_native.apps.size() == 1);
+            assert(preferred_native && preferred_native.apps.size() == 2);
             assert(preferred_native.apps.front().release.architecture == architecture);
             std::reverse(tied.begin(), tied.end());
         }
@@ -653,16 +982,16 @@ void test_store_architecture_selection()
                      make_registry_release("6.0.0", "all", "published", "0.2.0"),
                      make_registry_release("5.0.0", other_architecture), make_registry_release("1.2.3", architecture)},
                     architecture);
-        assert(eligible && eligible.apps.size() == 1);
+        assert(eligible && eligible.apps.size() == 2);
         assert(eligible.apps.front().release.architecture == architecture);
         assert(eligible.apps.front().latest_version == "1.2.3");
 
         const std::vector<RegistryRelease> foreign_only{make_registry_release("9.0.0", other_architecture)};
         const auto hidden = refresh(foreign_only, architecture);
-        assert(hidden && hidden.apps.empty());
+        assert(hidden && hidden.apps.size() == 1 && hidden.apps[0].runtime);
 
         const auto retained = refresh(foreign_only, architecture, "1.0.0");
-        assert(retained && retained.apps.size() == 1);
+        assert(retained && retained.apps.size() == 2);
         const auto &installed = retained.apps.front();
         assert(installed.installed && !installed.available && !installed.update_available);
         assert(installed.version == "1.0.0" && installed.latest_version == "1.0.0");
@@ -953,6 +1282,19 @@ void test_image_download_validation_and_curl_options()
 
 int main(int argc, char **argv)
 {
+    if (argc == 3 && std::string(argv[1]) == "--registry-root") {
+        PosixProcessRunner runner;
+        CurlHttpClient http(runner);
+        const auto result = RegistryClient(http).load(argv[2]);
+        if (!result) {
+            std::fprintf(stderr, "%s\n", result.error.c_str());
+            return 1;
+        }
+        for (const auto &package : result.catalog.apps)
+            std::printf("%s %s %s\n", package.runtime ? "runtime" : "app", package.package.c_str(),
+                        package.latest_version.c_str());
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--output-limit-probe") {
         const std::string chunk(256, 'x');
         for (int index = 0; index < 4096; ++index)
@@ -970,10 +1312,15 @@ int main(int argc, char **argv)
     ScopedEnvironmentVariable appkit_version("LILYGO_UI_APPKIT_VERSION", nullptr);
     test_router();
     test_model();
+    test_runtime_model_install_and_rollback_results();
     test_json_sha_and_debian_versions();
     test_registry_snapshot_protocol();
     test_store_service_and_package_verification();
     test_store_architecture_selection();
+    test_runtime_catalog_and_updates();
+    test_runtime_release_history_and_complete_catalog();
+    test_local_runtimes_without_registry_metadata();
+    test_runtime_inventory_detects_components_without_launchers();
     test_package_architecture_detection_and_installation();
     test_github_api_package_download();
     test_registry_root_cache();

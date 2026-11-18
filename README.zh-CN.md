@@ -12,6 +12,7 @@ Registry v1 客户端和独立的商店状态模型，可浏览 Registry 应用�
 - 查看应用作者、版本、大小和说明
 - 安装未安装应用，更新有新版本的应用
 - 查看并删除本机已安装应用
+- 在 Runtime 页面检查并更新已安装的共享运行库，查看当前版本、可用版本及更新结果
 - 从 LILYGO Registry Pages 读取不可变应用目录 snapshot
 - 安装前校验 Debian 包大小和 SHA-256
 - 适配 AppKit 默认的 568×1232 竖屏、1232×568 横屏和 320×568 紧凑竖屏
@@ -47,6 +48,10 @@ GitHub API 解析到资产下载端点，并在 API 不可用时回退 Registry 
 Store 使用 `dpkg-query` 回读目标版本。卸载通过 `pkexec dpkg --remove` 完成，商店禁止卸载自身。目录刷新和包操作
 均在工作线程执行，LVGL 线程只接收结果和更新页面。
 
+需要管理员权限时，Store 通过系统 polkit 显示密码输入页，支持硬件键盘、触屏键盘
+及取消操作，密码不会保存。若旧 Launcher 启动的应用继承了 `NoNewPrivs` 限制，
+请先升级并重启 Launcher，再重新打开 Store；应用本身无法清除此限制。
+
 依赖由 APT 2.2 或更新版本从设备已配置的 Debian/Raspberry Pi 软件源解析，必须在包的 `Depends` 或
 `Pre-Depends` 中声明，且软件源提供所需版本，或设备已经安装兼容版本。
 GitHub `packages` 应用目录不是 APT 源；Store 不会自动添加软件源，也不会将目录里的
@@ -69,6 +74,35 @@ cgroup 完成，并由更新服务重新启动 Launcher。尚未包含该 helper
 
 进一步的工程约定见 [项目总览](docs/00-overview.md)、
 [UI 开发规范](docs/01-user-interface.md) 和 [架构说明](docs/02-architecture.md)。
+
+## Runtime 包管理
+
+底部导航（横屏为侧栏）中的 **Runtime** 显示 Registry 已发布目录中的全部 runtime，
+包括未安装及没有当前设备兼容版本的包；不兼容的包仍可查看，但不能安装。Store 同时通过
+`dpkg-query` 合并本机已安装的 `lilygo-*` 系统组件和 `meshtasticd`，排除 Launcher 自身
+及带 Launcher 或 Desktop 入口的应用。旧目录或首次启动离线时，本机组件仍能显示。
+
+点击 **Check updates** 刷新目录。未安装的组件可以安装最新兼容版本，也可以在详情页
+选择历史版本安装；已安装的组件可以更新，或在确认目标版本后回退。可选版本必须保持
+`published` 状态，且架构匹配当前设备或为 `all`；yanked、revoked 及不兼容版本不能安装。
+版本按 Debian 规则排序，同一版本优先选择当前架构的包。安装历史版本或回退后，如果
+目录中有更新版本，仍会提示可更新。Runtime 继续不提供卸载操作。
+
+安装、更新和已确认的回退复用下载校验及提权 APT 流程，失败后保留错误说明并允许重试。
+成功后回读实际安装版本，刷新 runtime 与应用兼容性。本机发现但没有已验证目录记录的
+组件仅显示已安装版本及更新信息不可用，不提供未经验证的安装或回退目标。
+
+在线版本管理从已发布的 Registry v1 目录读取 `runtimes` 数组，以及同一 snapshot 下的
+runtime 详情和详情 SHA-256。旧版 Store 仍只读取应用目录，Runtime 不混入普通应用
+列表或 Installed 应用计数。
+
+可安装及回退的版本必须对应真实的 published release 记录和经过校验的 Debian 资产。
+本机发现已安装的包不会使它自动成为可下载包；没有更旧且兼容的历史发布版本时，不提供
+或虚构回退目标。板级 overlay（例如 `lilygo-t-display-cm0-overlay`）同样作为 runtime
+组件展示和管理。
+
+预览：[竖屏](assets/previews/store-runtime-portrait.png) ·
+[横屏](assets/previews/store-runtime-landscape.png)。
 
 应用 ID、名称、版本、说明、许可证、图标、兼容性和 Launcher 排序等项目元数据统一维护在
 `lpm.toml`。CMake 配置时通过 LPM 读取并校验这些字段，再生成 Launcher、Desktop、

@@ -6,6 +6,13 @@
 #include "system/process.hpp"
 
 #include <string>
+#include <vector>
+
+struct InstalledRuntimePackage {
+    std::string package;
+    std::string version;
+    std::string summary;
+};
 
 struct InstalledPackageResult {
     bool installed = false;
@@ -31,8 +38,10 @@ public:
     }
 
     [[nodiscard]] InstalledPackageResult query(const std::string &package);
+    [[nodiscard]] std::vector<InstalledRuntimePackage> installed_runtimes();
     [[nodiscard]] std::string architecture();
-    [[nodiscard]] PackageOperationResult install(const std::string &package, const RegistryRelease &release);
+    [[nodiscard]] PackageOperationResult install(const std::string &package, const RegistryRelease &release,
+                                                 bool allow_downgrade = false);
     [[nodiscard]] PackageOperationResult remove(const std::string &package);
 
 private:

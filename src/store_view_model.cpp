@@ -1,4 +1,5 @@
 #include "store_view_model.hpp"
+#include "domain/debian_version.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -85,11 +86,38 @@ std::optional<StoreInstallCommand> StoreViewModel::begin_install(std::size_t ind
     return command;
 }
 
+std::optional<StoreInstallCommand> StoreViewModel::begin_runtime_install(const RuntimeReleaseSelection &selection,
+                                                                         bool operation_running, bool refresh_running,
+                                                                         bool confirm_downgrade)
+{
+    auto *item = model_.app(find_app(selection.app_id));
+    if (!item || !item->runtime || !item->catalogued || operation_running || refresh_running || item->busy)
+        return std::nullopt;
+    const auto release =
+        std::find_if(item->runtime_releases.begin(), item->runtime_releases.end(), [&](const auto &candidate) {
+            return candidate.status == "published" && candidate.version == selection.version &&
+                   candidate.architecture == selection.architecture && candidate.sha256 == selection.sha256;
+        });
+    if (release == item->runtime_releases.end()) {
+        item->operation_error = "This version is no longer available. Check for updates and select a version again.";
+        publish();
+        return std::nullopt;
+    }
+    const auto comparison = item->installed ? debian_version_compare(release->version, item->version) : 1;
+    if (comparison == 0 || (comparison < 0 && !confirm_downgrade)) return std::nullopt;
+    StoreInstallCommand command{item->package, item->app_id, item->name, *release, item->installed, comparison < 0};
+    item->busy = true;
+    item->operation_error.clear();
+    model_.set_status_message("Downloading and verifying " + item->name + " " + release->version + "...");
+    publish();
+    return command;
+}
+
 std::optional<StoreRemoveCommand> StoreViewModel::begin_remove(std::size_t index, bool operation_running,
                                                                bool refresh_running)
 {
     auto *item = model_.app(index);
-    if (!item || operation_running || refresh_running || item->busy || !item->installed ||
+    if (!item || operation_running || refresh_running || item->busy || !item->installed || item->runtime ||
         !is_removable_package(item->package))
         return std::nullopt;
 
@@ -117,12 +145,14 @@ void StoreViewModel::complete_install(const std::string &app_id, bool was_update
     auto *item       = model_.app(index);
     if (!item) return;
     const auto name = item->name;
-    item->busy      = false;
+    const bool rollback =
+        item->installed && !installed_version.empty() && debian_version_compare(installed_version, item->version) < 0;
+    item->busy = false;
     if (was_update)
         model_.update(index, std::move(installed_version));
     else
         model_.install(index, std::move(installed_version));
-    model_.set_status_message((was_update ? "Updated " : "Installed ") + name);
+    model_.set_status_message((rollback ? "Rolled back " : (was_update ? "Updated " : "Installed ")) + name);
     publish();
 }
 

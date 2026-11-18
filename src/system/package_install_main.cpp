@@ -12,9 +12,9 @@ extern char **environ;
 
 int main(int argc, char **argv)
 {
-    if (argc != 5) {
+    if ((argc != 5 && argc != 6) || (argc == 6 && std::strcmp(argv[5], "--allow-downgrade") != 0)) {
         std::cerr << "Usage: " << std::filesystem::path(argv[0]).filename().string()
-                  << " <package> <version> <sha256> <absolute-deb-path>\n";
+                  << " <package> <version> <sha256> <absolute-deb-path> [--allow-downgrade]\n";
         return 2;
     }
     if (geteuid() != 0) {
@@ -41,7 +41,7 @@ int main(int argc, char **argv)
 
     try {
         PosixProcessRunner runner(ProcessOutputLimit::truncate);
-        const auto result = install_debian_package(runner, {argv[1], argv[2], argv[3], argv[4]});
+        const auto result = install_debian_package(runner, {argv[1], argv[2], argv[3], argv[4], argc == 6});
         if (!result) {
             std::cerr << result.error << '\n';
             return 1;

@@ -1,6 +1,7 @@
 #include "pages/detail/detail_view.hpp"
 
 #include "components/components.hpp"
+#include "domain/debian_version.hpp"
 
 #include <cm0/typography.h>
 
@@ -132,6 +133,22 @@ void create_preview(lv_obj_t *body, const StoreApp &app)
 
 void create_facts(lv_obj_t *body, const StoreApp &app)
 {
+    if (app.runtime) {
+        auto *facts = make_card(body, LV_SIZE_CONTENT);
+        lv_obj_set_name_static(facts, "runtime_versions");
+        lv_obj_set_flex_flow(facts, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(facts, 8, 0);
+        for (const auto &text :
+             {app.package, app.installed ? "Installed: " + app.version : "Not installed",
+              !app.catalogued ? "Update information unavailable"
+                              : (app.available ? "Available: " + app.latest_version : "No compatible release"),
+              "Download: " + (app.size.empty() ? std::string("Unavailable") : app.size)}) {
+            auto *label = make_label(facts, text.c_str(), 14, COLOR_SECONDARY);
+            lv_obj_set_width(label, LV_PCT(100));
+            lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        }
+        return;
+    }
     auto *facts = make_card(body, 60);
     lv_obj_set_name_static(facts, "version_and_size");
     lv_obj_set_style_pad_hor(facts, 16, 0);
@@ -154,17 +171,19 @@ void create_facts(lv_obj_t *body, const StoreApp &app)
 
 void create_actions(lv_obj_t *body, const StoreApp &app, const DetailViewCallbacks &callbacks)
 {
-    const char *primary_text = "Open App";
+    const char *primary_text = app.runtime ? "Up to date" : "Open App";
     if (app.busy)
         primary_text = "Working...";
+    else if (app.runtime && !app.catalogued)
+        primary_text = "Updates Unavailable";
     else if (!app.available)
         primary_text = "Not Compatible";
     else if (is_launcher_package(app.package) && !app.installed)
         primary_text = "System Component";
     else if (!app.installed)
-        primary_text = "Get App";
+        primary_text = app.runtime ? "Install Runtime" : "Get App";
     else if (app.update_available)
-        primary_text = "Update App";
+        primary_text = app.runtime ? "Update Runtime" : "Update App";
 
     auto *primary = make_button(body, primary_text, 22, COLOR_ACTION, COLOR_SURFACE, callbacks.primary_action);
     lv_obj_set_name_static(primary, "primary_action");
@@ -173,7 +192,7 @@ void create_actions(lv_obj_t *body, const StoreApp &app, const DetailViewCallbac
         (app.installed && !app.update_available))
         lv_obj_clear_flag(primary, LV_OBJ_FLAG_CLICKABLE);
 
-    if (!app.installed || !is_removable_package(app.package)) return;
+    if (!app.installed || app.runtime || !is_removable_package(app.package)) return;
     auto *remove = make_button(body, LV_SYMBOL_TRASH "  Delete App", 22, COLOR_SURFACE, COLOR_DANGER, callbacks.remove);
     lv_obj_set_name_static(remove, "remove_action");
     lv_obj_set_size(remove, LV_PCT(100), 56);
@@ -199,6 +218,63 @@ void create_operation_error(lv_obj_t *body, const StoreApp &app)
     lv_label_set_long_mode(message, LV_LABEL_LONG_WRAP);
 }
 
+void delete_version_selection(lv_event_t *event)
+{
+    delete static_cast<RuntimeReleaseSelection *>(lv_event_get_user_data(event));
+}
+
+void create_runtime_versions(lv_obj_t *body, const StoreApp &app, const DetailViewCallbacks &callbacks)
+{
+    if (!app.runtime || !app.catalogued) return;
+    auto *section = make_flex(body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_name_static(section, "runtime_version_history");
+    lv_obj_set_size(section, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_row(section, 12, 0);
+    make_label(section, "Versions", 22, COLOR_TITLE);
+    const char *explanation = app.runtime_releases.empty()
+                                  ? "No compatible published versions are available."
+                                  : (app.runtime_releases.size() == 1
+                                         ? "Only one compatible version is currently published."
+                                         : "Choose a version to install. Older versions can be used to roll back.");
+    auto *description       = make_label(section, explanation, 14, COLOR_SECONDARY);
+    lv_obj_set_width(description, LV_PCT(100));
+    lv_label_set_long_mode(description, LV_LABEL_LONG_WRAP);
+    for (const auto &release : app.runtime_releases) {
+        auto *row = make_card(section, LV_SIZE_CONTENT);
+        lv_obj_set_name(row, ("runtime_version:" + release.version).c_str());
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_style_pad_column(row, 12, 0);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        auto *copy = make_flex(row, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_width(copy, 0);
+        lv_obj_set_height(copy, LV_SIZE_CONTENT);
+        lv_obj_set_flex_grow(copy, 1);
+        lv_obj_set_style_pad_row(copy, 4, 0);
+        auto *version = make_label(copy, release.version.c_str(), 22, COLOR_TEXT);
+        lv_obj_set_width(version, LV_PCT(100));
+        lv_label_set_long_mode(version, LV_LABEL_LONG_WRAP);
+        const auto metadata =
+            release.architecture + (release.published_at.empty() ? "" : " · " + release.published_at.substr(0, 10));
+        auto *label = make_label(copy, metadata.c_str(), 14, COLOR_SECONDARY);
+        lv_obj_set_width(label, LV_PCT(100));
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        const int comparison  = app.installed ? debian_version_compare(release.version, app.version) : 1;
+        const bool actionable = !app.busy && comparison != 0;
+        const char *action =
+            app.busy ? "Working"
+                     : (!app.installed ? "Install"
+                                       : (comparison == 0 ? "Installed" : (comparison < 0 ? "Roll back" : "Update")));
+        auto *selection =
+            new RuntimeReleaseSelection{app.app_id, release.version, release.architecture, release.sha256};
+        auto *button = make_button(row, action, 14, actionable ? COLOR_ACTION : COLOR_DISABLED_SURFACE,
+                                   actionable ? COLOR_SURFACE : COLOR_SECONDARY,
+                                   actionable ? callbacks.install_version : nullptr, selection);
+        lv_obj_set_name_static(button, "runtime_version_action");
+        lv_obj_set_size(button, 96, 44);
+        lv_obj_add_event_cb(button, delete_version_selection, LV_EVENT_DELETE, selection);
+    }
+}
+
 void create_source_notice(lv_obj_t *body, const StoreApp &app)
 {
     auto *notice = make_flex(body, LV_FLEX_FLOW_ROW);
@@ -219,7 +295,10 @@ void create_source_notice(lv_obj_t *body, const StoreApp &app)
     lv_obj_center(check);
     const char *message = app.official ? "This app is published by LILYGO."
                                        : "This community app is distributed through the LILYGO Registry.";
-    auto *text          = make_label(notice, message, 14, COLOR_TEXT);
+    if (app.runtime) message = "This shared component is managed by the system. Restart affected apps after updating.";
+    if (app.runtime && !app.catalogued)
+        message = "Installed locally. Updates will be available when this component is included in the catalog.";
+    auto *text = make_label(notice, message, 14, COLOR_TEXT);
     lv_obj_set_width(text, 0);
     lv_obj_set_flex_grow(text, 1);
     lv_label_set_long_mode(text, LV_LABEL_LONG_WRAP);
@@ -298,12 +377,13 @@ void build_detail_view(lv_obj_t *content, DetailViewModel &view_model, const Det
     lv_obj_set_style_min_height(summary, 32, 0);
     lv_label_set_long_mode(summary, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_line_space(summary, 4, 0);
-    create_preview(body, *app);
+    if (!app->runtime) create_preview(body, *app);
     create_facts(body, *app);
     create_operation_error(body, *app);
     create_actions(body, *app, callbacks);
+    create_runtime_versions(body, *app, callbacks);
     create_source_notice(body, *app);
-    create_permissions(body, *app);
+    if (!app->runtime) create_permissions(body, *app);
 }
 
 }  // namespace

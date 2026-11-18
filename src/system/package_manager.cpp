@@ -1,6 +1,8 @@
 #include "system/package_manager.hpp"
+#include "system/package_name.hpp"
 
 #include "app_identity.h"
+#include "domain/debian_version.hpp"
 #include "domain/store_model.hpp"
 #include "registry/json.hpp"
 #include "registry/sha256.hpp"
@@ -9,6 +11,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <optional>
+#include <set>
+#include <sstream>
 #include <string_view>
 #include <system_error>
 #include <unistd.h>
@@ -151,7 +155,7 @@ std::vector<std::string> privileged_dpkg(std::vector<std::string> arguments)
 
 InstalledPackageResult PackageManager::query(const std::string &package)
 {
-    if (!valid_package_name(package)) return {false, {}, "Invalid package name"};
+    if (!valid_debian_package_name(package)) return {false, {}, "Invalid package name"};
     const auto result = runner_.run({"dpkg-query", "--show", "--showformat=${db:Status-Abbrev}\t${Version}", package});
     if (result.exit_code != 0) return {};
     const auto separator = result.output.find('\t');
@@ -160,6 +164,55 @@ InstalledPackageResult PackageManager::query(const std::string &package)
     const auto version = trimmed(result.output.substr(separator + 1));
     if (status.size() != 3 || status[1] != 'i' || status[2] != ' ' || version.empty()) return {};
     return {true, version, {}};
+}
+
+std::vector<InstalledRuntimePackage> PackageManager::installed_runtimes()
+{
+    // Product components are identified locally. Keep the third-party daemon
+    // discoverable with legacy/offline catalogs; other runtimes use Registry.
+    const auto inventory = runner_.run({"dpkg-query", "--show",
+                                        "--showformat=${Package}\t${db:Status-Abbrev}\t${Version}\t${binary:Summary}\n",
+                                        "lilygo-*", "meshtasticd"});
+    // Exit 1 can mean only one pattern had no matches; other packages are valid.
+    if ((inventory.exit_code != 0 && inventory.exit_code != 1) || inventory.output_limit_exceeded) return {};
+    std::vector<InstalledRuntimePackage> runtimes;
+    std::set<std::string> seen;
+    std::istringstream rows(inventory.output);
+    std::string line;
+    while (std::getline(rows, line)) {
+        std::istringstream fields(line);
+        InstalledRuntimePackage item;
+        std::string status;
+        if (!std::getline(fields, item.package, '\t') || !std::getline(fields, status, '\t') ||
+            !std::getline(fields, item.version, '\t'))
+            continue;
+        std::getline(fields, item.summary);
+        item.version = trimmed(std::move(item.version));
+        item.summary = trimmed(std::move(item.summary));
+        if (!valid_debian_package_name(item.package) ||
+            (item.package.rfind("lilygo-", 0) != 0 && item.package != "meshtasticd") || status.size() != 3 ||
+            status[1] != 'i' || status[2] != ' ' || item.version.empty() || is_launcher_package(item.package) ||
+            !seen.insert(item.package).second)
+            continue;
+
+        const auto files = runner_.run({"dpkg-query", "--listfiles", item.package});
+        if (files.exit_code != 0 || files.output_limit_exceeded) continue;
+        bool application = false;
+        std::istringstream paths(files.output);
+        std::string path;
+        while (std::getline(paths, path)) {
+            path = trimmed(std::move(path));
+            if ((path.rfind("/usr/share/launcher/apps/", 0) == 0 && path.size() >= 5 &&
+                 path.compare(path.size() - 5, 5, ".json") == 0) ||
+                (path.rfind("/usr/share/applications/", 0) == 0 && path.size() >= 8 &&
+                 path.compare(path.size() - 8, 8, ".desktop") == 0)) {
+                application = true;
+                break;
+            }
+        }
+        if (!application) runtimes.push_back(std::move(item));
+    }
+    return runtimes;
 }
 
 std::string PackageManager::architecture()
@@ -182,17 +235,25 @@ std::string PackageManager::architecture()
 #endif
 }
 
-PackageOperationResult PackageManager::install(const std::string &package, const RegistryRelease &release)
+PackageOperationResult PackageManager::install(const std::string &package, const RegistryRelease &release,
+                                               bool allow_downgrade)
 {
-    if (!valid_package_name(package) || release.status != "published" || release.size == 0 ||
+    if (!valid_debian_package_name(package) || release.status != "published" || release.size == 0 ||
         release.sha256.size() != 64)
         return {{}, "Invalid Registry package record", false};
     const auto native_architecture = architecture();
     if (native_architecture.empty()) return {{}, "Unable to determine the device package architecture", false};
     if (release.architecture != native_architecture && release.architecture != "all")
         return {{}, "Package architecture does not match the device", false};
-    if (is_launcher_package(package) && !query(package).installed)
+    const auto current = query(package);
+    if (!current.error.empty()) return {{}, "Unable to read installed package state: " + current.error, false};
+    const bool launcher = is_launcher_package(package);
+    if (launcher && !current.installed)
         return {{}, "A Launcher package with Store update support must be installed first", false};
+    if (current.installed && debian_version_compare(release.version, current.version) < 0 &&
+        (!allow_downgrade || launcher))
+        return {
+            {}, launcher ? "Launcher cannot be downgraded" : "Package downgrade requires explicit permission", false};
     TemporaryPackage temporary;
     if (temporary.path().empty()) return {{}, "Unable to create temporary download file", false};
     const bool allow_file = release.url.rfind("file://", 0) == 0;
@@ -206,9 +267,10 @@ PackageOperationResult PackageManager::install(const std::string &package, const
     if (!sha256_file(temporary.path(), digest, hash_error)) return {{}, hash_error, false};
     if (digest != release.sha256) return {{}, "Downloaded package SHA-256 mismatch", false};
 
-    const auto installed = runner_.run(privileged_command({LILYGO_UI_STORE_PACKAGE_INSTALL_HELPER, package,
-                                                           release.version, release.sha256, temporary.path().string()}),
-                                       4 * 1024 * 1024);
+    std::vector<std::string> command{LILYGO_UI_STORE_PACKAGE_INSTALL_HELPER, package, release.version, release.sha256,
+                                     temporary.path().string()};
+    if (allow_downgrade && !launcher) command.push_back("--allow-downgrade");
+    const auto installed = runner_.run(privileged_command(std::move(command)), 4 * 1024 * 1024);
     if (installed.exit_code != 0) return {{}, process_error(installed, "APT installation failed"), false};
     if (is_launcher_package(package)) return {release.version, {}, true};
     const auto state = query(package);

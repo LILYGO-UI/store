@@ -25,6 +25,22 @@ set_target_properties(StorePNG::StorePNG PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${STORE_PNG_INCLUDE_DIR}")
 mark_as_advanced(STORE_PNG_INCLUDE_DIR STORE_PNG_LIBRARY)
 
+add_library(lilygo_ui_store_auth STATIC src/system/authentication_agent.cpp)
+target_include_directories(lilygo_ui_store_auth PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_features(lilygo_ui_store_auth PUBLIC cxx_std_17)
+target_compile_options(lilygo_ui_store_auth PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(lilygo_ui_store_auth PUBLIC Threads::Threads)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(STORE_POLKIT REQUIRED IMPORTED_TARGET polkit-agent-1 gio-2.0)
+    target_link_libraries(lilygo_ui_store_auth PRIVATE PkgConfig::STORE_POLKIT)
+    # Explicit opt-in only: this prompts via /dev/tty and executes /usr/bin/true.
+    add_executable(store-auth-integration-tests EXCLUDE_FROM_ALL
+        tests/test_authentication_integration.cpp src/system/process.cpp)
+    target_link_libraries(store-auth-integration-tests PRIVATE lilygo_ui_store_auth)
+    target_compile_options(store-auth-integration-tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 set(LILYGO_UI_STORE_PACKAGE_INSTALL_HELPER
     "${CMAKE_INSTALL_FULL_LIBEXECDIR}/${LILYGO_UI_PACKAGE_NAME}/${LILYGO_UI_PACKAGE_NAME}-package-install")
 _lilygo_ui_escape_c(LILYGO_UI_STORE_PACKAGE_INSTALL_HELPER_C
@@ -58,6 +74,7 @@ target_link_libraries(lilygo_ui_store_core PUBLIC Threads::Threads PRIVATE Store
 
 add_library(lilygo_ui_store_ui STATIC
     src/app.cpp
+    src/components/authentication_view.cpp
     src/components/components.cpp
     src/store_view_model.cpp
     src/pages/catalog/catalog_view.cpp
@@ -73,6 +90,7 @@ target_compile_options(lilygo_ui_store_ui PRIVATE
     -Wall -Wextra -Wpedantic)
 target_link_libraries(lilygo_ui_store_ui PUBLIC
     lilygo_ui_store_core
+    lilygo_ui_store_auth
     LilyGoUI::Runtime)
 
 add_executable(lilygo_ui_store src/main.cpp)

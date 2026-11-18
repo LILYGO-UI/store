@@ -1,4 +1,7 @@
 #include "system/apt_installer.hpp"
+#include "system/package_manager.hpp"
+
+#include "app_identity.h"
 
 #include <algorithm>
 #include <cassert>
@@ -189,7 +192,7 @@ public:
     ProcessResult handoff{0, {}, {}};
 };
 
-void check_apt_options(const std::vector<std::string> &arguments)
+void check_apt_options(const std::vector<std::string> &arguments, bool allow_downgrade = false)
 {
     assert(arguments.front() == "/usr/bin/apt-get");
     assert(contains(arguments, "--yes"));
@@ -198,7 +201,7 @@ void check_apt_options(const std::vector<std::string> &arguments)
     assert(contains_pair(arguments, "-o", "DPkg::Lock::Timeout=60"));
     assert(contains_pair(arguments, "-o", "Dpkg::Options::=--force-confold"));
     assert(!contains(arguments, "--allow-unauthenticated"));
-    assert(!contains(arguments, "--allow-downgrades"));
+    assert(contains(arguments, "--allow-downgrades") == allow_downgrade);
     assert(!contains(arguments, "--allow-change-held-packages"));
 }
 
@@ -226,6 +229,134 @@ void test_application_install_uses_verified_staged_package()
     assert(runner.calls.back().arguments == install);
     runner.check_cleaned();
     assert(read_file(fixture.path) == "changed after staging");
+}
+
+void test_runtime_names_use_verified_installer()
+{
+    PackageFixture fixture;
+    for (const auto *package : {"meshtasticd", "libexample1.2", "runtime+extra"}) {
+        const auto request = fixture.request(package);
+        FakeRunner runner(request);
+        assert(install_debian_package(runner, request));
+        assert(runner.count("/usr/bin/apt-get", "install") == 1);
+        runner.check_cleaned();
+    }
+}
+
+void test_downgrade_flag_is_explicit_and_not_used_for_launcher()
+{
+    PackageFixture fixture;
+    for (const bool allow : {false, true}) {
+        auto request            = fixture.request("meshtasticd");
+        request.allow_downgrade = allow;
+        FakeRunner runner(request);
+        assert(install_debian_package(runner, request));
+        const auto &install = runner.find("/usr/bin/apt-get", "install");
+        check_apt_options(install, allow);
+        assert(contains_pair(install, "--", runner.staged.string()));
+        assert(!contains(runner.find("/usr/bin/apt-get", "update"), "--allow-downgrades"));
+        runner.check_cleaned();
+
+        request                 = fixture.request("lilygo-ui-launcher");
+        request.allow_downgrade = allow;
+        FakeRunner launcher(request);
+        assert(install_debian_package(launcher, request));
+        check_apt_options(launcher.find("/usr/bin/apt-get", "satisfy"));
+        launcher.check_cleaned();
+
+        FakeRunner rejected(request);
+        rejected.installed_launcher.output = "ii \t3.0.0\n";
+        rejected.upgrade.exit_code         = 1;
+        assert(!install_debian_package(rejected, request));
+        assert(rejected.count("/usr/bin/apt-get") == 0);
+        rejected.check_cleaned();
+    }
+}
+
+class PackageDownload final : public HttpClient {
+public:
+    bool downloaded = false;
+
+    HttpTextResult get(const std::string &, std::size_t, bool) override
+    {
+        assert(false && "This fixture must not request network metadata");
+        return {{}, "Unexpected request"};
+    }
+
+    HttpDownloadResult download(const std::string &, const fs::path &destination, std::uint64_t, bool) override
+    {
+        downloaded = true;
+        write_file(destination, "abc");
+        return {};
+    }
+};
+
+class PackageRunner final : public ProcessRunner {
+public:
+    std::string version = "3.0.0";
+    std::vector<std::string> helper_command;
+
+    ProcessResult run(const std::vector<std::string> &arguments, std::size_t) override
+    {
+        if (arguments.front() == "dpkg") return {0, "arm64\n", {}, false};
+        if (arguments.front() == "dpkg-query") {
+            if (version.empty()) return {1, {}, "not installed", false};
+            return {0, "ii \t" + version, {}, false};
+        }
+        const std::size_t helper_index = arguments.front() == "pkexec" ? 1 : 0;
+        assert(arguments.at(helper_index) == LILYGO_UI_STORE_PACKAGE_INSTALL_HELPER);
+        assert(read_file(arguments.at(helper_index + 4)) == "abc");
+        helper_command = arguments;
+        if (arguments.at(helper_index + 1) != "lilygo-ui-launcher") version = arguments.at(helper_index + 2);
+        return {0, {}, {}, false};
+    }
+};
+
+void test_package_manager_requires_explicit_downgrade()
+{
+    RegistryRelease release;
+    release.version      = "2.0.0";
+    release.architecture = "all";
+    release.status       = "published";
+    release.size         = 3;
+    release.sha256       = kDigest;
+    release.url          = "https://registry.test/runtime.deb";
+    for (const auto *name : {"meshtasticd", "libexample1.2", "runtime+extra"}) {
+        PackageDownload download;
+        PackageRunner runner;
+        PackageManager packages(runner, download);
+        const auto rejected = packages.install(name, release);
+        assert(!rejected && rejected.error.find("downgrade") != std::string::npos);
+        assert(!download.downloaded && runner.helper_command.empty());
+        assert(runner.version == "3.0.0");
+        const auto downgraded = packages.install(name, release, true);
+        assert(downgraded && downgraded.installed_version == release.version);
+        assert(download.downloaded && runner.helper_command.back() == "--allow-downgrade");
+
+        runner.version.clear();
+        runner.helper_command.clear();
+        assert(packages.install(name, release));
+        assert(!contains(runner.helper_command, "--allow-downgrade"));
+        runner.version = "1.0.0";
+        assert(packages.install(name, release));
+        assert(!contains(runner.helper_command, "--allow-downgrade"));
+    }
+
+    PackageDownload download;
+    PackageRunner launcher;
+    PackageManager packages(launcher, download);
+    assert(!packages.install("lilygo-ui-launcher", release, true));
+    assert(!download.downloaded && launcher.helper_command.empty());
+    launcher.version = "1.0.0";
+    assert(packages.install("lilygo-ui-launcher", release, true).launcher_update_queued);
+    assert(!contains(launcher.helper_command, "--allow-downgrade"));
+
+    PackageDownload epoch_download;
+    PackageRunner epoch_runner;
+    PackageManager epoch_packages(epoch_runner, epoch_download);
+    release.version = "1:1.0";
+    assert(epoch_packages.install("meshtasticd", release));
+    assert(!contains(epoch_runner.helper_command, "--allow-downgrade"));
 }
 
 void test_invalid_inputs_stop_before_commands()
@@ -514,6 +645,9 @@ int main()
 {
     test_application_install_uses_verified_staged_package();
     test_invalid_inputs_stop_before_commands();
+    test_runtime_names_use_verified_installer();
+    test_downgrade_flag_is_explicit_and_not_used_for_launcher();
+    test_package_manager_requires_explicit_downgrade();
     test_metadata_and_architecture_rejections();
     test_source_refresh_failure_prevents_install();
     test_dependency_failure_is_reported_without_handoff();

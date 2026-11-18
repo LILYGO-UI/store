@@ -3,6 +3,8 @@
 #include "app_identity.h"
 #include "app_router.hpp"
 #include "components/components.hpp"
+#include "components/authentication_view.hpp"
+#include "domain/debian_version.hpp"
 #include "pages/catalog/catalog_view.hpp"
 #include "pages/detail/detail_view.hpp"
 #include "pages/installed/installed_view.hpp"
@@ -29,7 +31,7 @@ constexpr int kWideNavigationWidth   = 180;
 constexpr int kContentMaxWidth       = 720;
 constexpr int kHomeIndicatorSafeArea = 38;
 
-enum class AsyncResultKind { refresh, install, remove, icon, screenshot };
+enum class AsyncResultKind { refresh, install, remove, icon, screenshot, authentication, authenticated };
 
 struct AsyncResult {
     AsyncResultKind kind = AsyncResultKind::refresh;
@@ -42,6 +44,7 @@ struct AsyncResult {
     StoreRefreshResult refresh;
     PackageOperationResult package;
     StoreImageDownloadResult image;
+    AuthenticationPrompt authentication;
 };
 
 struct AsyncMailbox {
@@ -54,14 +57,23 @@ struct AppViewState {
     std::unique_ptr<StoreViewModel> store;
     AppRouter router;
     std::unique_ptr<CatalogViewModel> catalog;
+    std::unique_ptr<CatalogViewModel> runtimes;
     std::unique_ptr<InstalledViewModel> installed;
     std::unique_ptr<DetailViewModel> detail;
     std::unique_ptr<CatalogView> catalog_view;
+    std::unique_ptr<CatalogView> runtime_view;
     std::unique_ptr<InstalledView> installed_view;
     std::unique_ptr<DetailView> detail_view;
-    lv_obj_t *surface                     = nullptr;
-    lv_obj_t *content                     = nullptr;
-    lv_obj_t *navigation                  = nullptr;
+    std::unique_ptr<AuthenticationView> authentication_view;
+    std::shared_ptr<AuthenticationAgent> authentication_agent;
+    lv_obj_t *surface         = nullptr;
+    lv_obj_t *content         = nullptr;
+    lv_obj_t *navigation      = nullptr;
+    lv_obj_t *rollback_dialog = nullptr;
+    std::string rollback_focus_app_id;
+    std::string rollback_focus_version;
+    std::optional<RuntimeReleaseSelection> rollback_selection;
+    bool rollback_close_pending           = false;
     lv_timer_t *worker_timer              = nullptr;
     std::shared_ptr<AsyncMailbox> mailbox = std::make_shared<AsyncMailbox>();
     bool refresh_running                  = false;
@@ -79,10 +91,15 @@ struct AppViewState {
     void prepare_session()
     {
         if (mailbox) mailbox->accepting = false;
-        router                   = AppRouter{};
-        surface                  = nullptr;
-        content                  = nullptr;
-        navigation               = nullptr;
+        router          = AppRouter{};
+        surface         = nullptr;
+        content         = nullptr;
+        navigation      = nullptr;
+        rollback_dialog = nullptr;
+        rollback_focus_app_id.clear();
+        rollback_focus_version.clear();
+        rollback_selection.reset();
+        rollback_close_pending   = false;
         worker_timer             = nullptr;
         mailbox                  = std::make_shared<AsyncMailbox>();
         refresh_running          = false;
@@ -123,12 +140,38 @@ void deliver_async(const std::shared_ptr<AsyncMailbox> &mailbox, AsyncResult res
     if (mailbox->accepting) mailbox->results.push_back(std::move(result));
 }
 
+void close_authentication()
+{
+    if (!app_state.authentication_view || !app_state.authentication_view->visible()) return;
+    app_state.authentication_view->destroy();
+    if (!app_state.rollback_dialog) {
+        lv_obj_remove_flag(app_state.content, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(app_state.navigation, LV_OBJ_FLAG_HIDDEN);
+    }
+    apply_layout();
+    auto *focus = lv_obj_find_by_name(app_state.content, "primary_action");
+    if (!focus) focus = lv_obj_find_by_name(app_state.navigation, "navigation_runtime");
+    if (focus && lv_obj_get_group(focus)) lv_group_focus_obj(focus);
+}
+
 void apply_async_result(AsyncResult result)
 {
     if (!app_state.store || app_state.closing) return;
+    if (result.kind == AsyncResultKind::authentication) {
+        if (!app_state.operation_running) return;
+        lv_obj_add_flag(app_state.content, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(app_state.navigation, LV_OBJ_FLAG_HIDDEN);
+        app_state.authentication_view->show(app_state.surface, result.authentication);
+        return;
+    }
+    if (result.kind == AsyncResultKind::authenticated) {
+        close_authentication();
+        return;
+    }
     if (result.kind == AsyncResultKind::refresh) {
         if (result.cached_refresh) {
-            if (app_state.online_refresh_succeeded || !result.refresh) return;
+            if (app_state.online_refresh_succeeded) return;
+            if (!result.refresh && (!app_state.store->apps().empty() || result.refresh.apps.empty())) return;
             app_state.store->replace_catalog(std::move(result.refresh.apps));
             if (app_state.online_refresh_finished)
                 app_state.store->set_registry_error(app_state.online_refresh_error);
@@ -147,6 +190,8 @@ void apply_async_result(AsyncResult result)
             app_state.store->replace_catalog(std::move(result.refresh.apps));
             start_app_icon_downloads();
         } else {
+            if (app_state.store->apps().empty() && !result.refresh.apps.empty())
+                app_state.store->replace_catalog(std::move(result.refresh.apps));
             app_state.online_refresh_error = result.refresh.error;
             app_state.store->set_registry_error(std::move(result.refresh.error));
         }
@@ -168,6 +213,7 @@ void apply_async_result(AsyncResult result)
     }
 
     app_state.operation_running = false;
+    close_authentication();
     if (!result.package) {
         app_state.store->fail_operation(result.app_id, std::move(result.package.error));
         return;
@@ -181,9 +227,14 @@ void apply_async_result(AsyncResult result)
     }
     if (result.kind == AsyncResultKind::remove)
         app_state.store->complete_remove(result.app_id);
-    else
+    else {
         app_state.store->complete_install(result.app_id, result.was_update,
                                           std::move(result.package.installed_version));
+        const auto *updated = app_state.store->app(app_state.store->find_app(result.app_id));
+        // A shared runtime (especially AppKit) can change which app releases
+        // are compatible. Re-query package versions and release eligibility.
+        if (updated && updated->runtime) start_registry_refresh();
+    }
 }
 
 void poll_workers(lv_timer_t *)
@@ -270,21 +321,133 @@ void start_detail_screenshot_downloads()
     }).detach();
 }
 
-void start_install(std::size_t index)
+void dispatch_install(StoreInstallCommand command)
 {
-    if (!app_state.store) return;
-    auto command = app_state.store->begin_install(index, app_state.operation_running, app_state.refresh_running);
-    if (!command) return;
     app_state.operation_running = true;
     const auto mailbox          = app_state.mailbox;
-    std::thread([mailbox, command = std::move(*command)] {
+    const auto agent            = app_state.authentication_agent;
+    std::thread([mailbox, agent, command = std::move(command)] {
         AsyncResult result;
         result.kind       = AsyncResultKind::install;
         result.app_id     = command.app_id;
         result.was_update = command.was_update;
-        result.package    = install_store_package(command.package, command.release);
+        if (!mailbox->accepting) return;
+        if (agent->start(result.package.error) && mailbox->accepting)
+            result.package = install_store_package(command.package, command.release, command.allow_downgrade);
         deliver_async(mailbox, std::move(result));
     }).detach();
+}
+
+void start_install(std::size_t index)
+{
+    if (!app_state.store) return;
+    auto command = app_state.store->begin_install(index, app_state.operation_running, app_state.refresh_running);
+    if (command) dispatch_install(std::move(*command));
+}
+
+void start_runtime_version_install(const RuntimeReleaseSelection &selection, bool confirm_downgrade)
+{
+    if (!app_state.store) return;
+    auto command = app_state.store->begin_runtime_install(selection, app_state.operation_running,
+                                                          app_state.refresh_running, confirm_downgrade);
+    if (command) dispatch_install(std::move(*command));
+}
+
+void close_rollback_async(void *)
+{
+    app_state.rollback_close_pending = false;
+    if (!app_state.rollback_dialog || app_state.closing) return;
+    lv_obj_remove_flag(app_state.content, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(app_state.navigation, LV_OBJ_FLAG_HIDDEN);
+    auto *dialog              = app_state.rollback_dialog;
+    app_state.rollback_dialog = nullptr;
+    lv_obj_delete(dialog);
+    app_state.rollback_selection.reset();
+    apply_layout();
+    lv_obj_t *focus      = nullptr;
+    const auto *selected = app_state.store ? app_state.store->model().selected_app() : nullptr;
+    if (selected && selected->app_id == app_state.rollback_focus_app_id) {
+        const auto name = "runtime_version:" + app_state.rollback_focus_version;
+        if (auto *row = lv_obj_find_by_name(app_state.content, name.c_str()))
+            focus = lv_obj_find_by_name(row, "runtime_version_action");
+    }
+    if (!focus) focus = lv_obj_find_by_name(app_state.content, "primary_action");
+    if (!focus) focus = lv_obj_find_by_name(app_state.navigation, "navigation_runtime");
+    if (focus && lv_obj_get_group(focus)) lv_group_focus_obj(focus);
+    app_state.rollback_focus_app_id.clear();
+    app_state.rollback_focus_version.clear();
+}
+
+void request_rollback_close()
+{
+    if (!app_state.rollback_close_pending)
+        app_state.rollback_close_pending = lv_async_call(close_rollback_async, &app_state) == LV_RESULT_OK;
+}
+
+void rollback_cancel_event(lv_event_t *)
+{
+    app_state.rollback_selection.reset();
+    request_rollback_close();
+}
+
+void rollback_confirm_event(lv_event_t *)
+{
+    if (!app_state.rollback_selection || app_state.rollback_close_pending) return;
+    const auto selection = *app_state.rollback_selection;
+    app_state.rollback_selection.reset();
+    request_rollback_close();
+    start_runtime_version_install(selection, true);
+}
+
+void runtime_version_event(lv_event_t *event)
+{
+    const auto *selection = static_cast<const RuntimeReleaseSelection *>(lv_event_get_user_data(event));
+    if (!selection || !app_state.store || app_state.operation_running || app_state.refresh_running ||
+        app_state.rollback_dialog)
+        return;
+    const auto *app = app_state.store->app(app_state.store->find_app(selection->app_id));
+    if (!app || !app->runtime) return;
+    if (!app->installed || debian_version_compare(selection->version, app->version) >= 0) {
+        start_runtime_version_install(*selection, false);
+        return;
+    }
+    app_state.rollback_selection     = *selection;
+    app_state.rollback_focus_app_id  = selection->app_id;
+    app_state.rollback_focus_version = selection->version;
+    // Hide the underlying pages so keyboard traversal also stays inside the
+    // confirmation. Both containers and their scroll positions are preserved.
+    lv_obj_add_flag(app_state.content, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(app_state.navigation, LV_OBJ_FLAG_HIDDEN);
+    auto *dialog              = make_flex(app_state.surface, LV_FLEX_FLOW_COLUMN);
+    app_state.rollback_dialog = dialog;
+    lv_obj_set_name_static(dialog, "runtime_rollback_dialog");
+    style_box(dialog, COLOR_PAGE);
+    lv_obj_add_flag(dialog, LV_OBJ_FLAG_FLOATING);
+    lv_obj_add_flag(dialog, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(dialog, LV_PCT(100), LV_PCT(100));
+    lv_obj_align(dialog, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_pad_all(dialog, 16, 0);
+    lv_obj_set_flex_align(dialog, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    auto *card = make_card(dialog, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_width(card, 520, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(card, 16, 0);
+    auto *title = make_label(card, "Roll back runtime?", 28, COLOR_TITLE);
+    lv_obj_set_width(title, LV_PCT(100));
+    lv_label_set_long_mode(title, LV_LABEL_LONG_WRAP);
+    const auto description = app->name + "\n" + app->version + " → " + selection->version +
+                             "\n\nDependencies will be checked before installing the older version.";
+    auto *message = make_label(card, description.c_str(), 22, COLOR_TEXT);
+    lv_obj_set_name_static(message, "runtime_rollback_description");
+    lv_obj_set_width(message, LV_PCT(100));
+    lv_label_set_long_mode(message, LV_LABEL_LONG_WRAP);
+    auto *cancel = make_button(card, "Cancel", 22, COLOR_CONTROL, COLOR_TEXT, rollback_cancel_event);
+    lv_obj_set_name_static(cancel, "runtime_rollback_cancel");
+    lv_obj_set_size(cancel, LV_PCT(100), 48);
+    auto *confirm = make_button(card, "Roll back", 22, COLOR_DANGER, COLOR_SURFACE, rollback_confirm_event);
+    lv_obj_set_name_static(confirm, "runtime_rollback_confirm");
+    lv_obj_set_size(confirm, LV_PCT(100), 48);
+    if (lv_obj_get_group(cancel)) lv_group_focus_obj(cancel);
 }
 
 void start_remove(std::size_t index)
@@ -294,11 +457,14 @@ void start_remove(std::size_t index)
     if (!command) return;
     app_state.operation_running = true;
     const auto mailbox          = app_state.mailbox;
-    std::thread([mailbox, command = std::move(*command)] {
+    const auto agent            = app_state.authentication_agent;
+    std::thread([mailbox, agent, command = std::move(*command)] {
         AsyncResult result;
-        result.kind    = AsyncResultKind::remove;
-        result.app_id  = command.app_id;
-        result.package = remove_store_package(command.package);
+        result.kind   = AsyncResultKind::remove;
+        result.app_id = command.app_id;
+        if (!mailbox->accepting) return;
+        if (agent->start(result.package.error) && mailbox->accepting)
+            result.package = remove_store_package(command.package);
         deliver_async(mailbox, std::move(result));
     }).detach();
 }
@@ -359,6 +525,8 @@ void navigation_event(lv_event_t *event)
     const auto page = static_cast<StorePage>(reinterpret_cast<std::intptr_t>(lv_event_get_user_data(event)));
     if (page == StorePage::catalog)
         app_state.router.show_catalog();
+    else if (page == StorePage::runtimes)
+        app_state.router.show_runtimes();
     else
         app_state.router.show_installed();
     app_state.restore_detail_origin_scroll = false;
@@ -402,6 +570,7 @@ struct NavigationItem {
 constexpr NavigationItem kNavigationItems[] = {
     {StorePage::catalog, LV_SYMBOL_DOWNLOAD, "Store", "navigation_store"},
     {StorePage::installed, "\xEF\x80\x89", "Installed", "navigation_installed"},
+    {StorePage::runtimes, LV_SYMBOL_SETTINGS, "Runtime", "navigation_runtime"},
 };
 
 // Navigation buttons live for the whole session; renders only restyle them.
@@ -443,12 +612,16 @@ void render_page_now()
     if (app_state.closing || !app_state.content || !app_state.navigation) return;
 
     if (app_state.catalog_view) app_state.catalog_view->destroy();
+    if (app_state.runtime_view) app_state.runtime_view->destroy();
     if (app_state.installed_view) app_state.installed_view->destroy();
     if (app_state.detail_view) app_state.detail_view->destroy();
 
     switch (app_state.router.page()) {
         case StorePage::catalog:
             app_state.catalog_view->create(app_state.content);
+            break;
+        case StorePage::runtimes:
+            app_state.runtime_view->create(app_state.content);
             break;
         case StorePage::installed:
             app_state.installed_view->create(app_state.content);
@@ -587,19 +760,40 @@ void app_open(const cm0_app_context_t *context)
         app_state.closing = true;
         return;
     }
+    const auto mailbox             = app_state.mailbox;
+    app_state.authentication_agent = std::make_shared<AuthenticationAgent>(
+        [mailbox](AuthenticationPrompt prompt) {
+            AsyncResult result;
+            result.kind           = AsyncResultKind::authentication;
+            result.authentication = std::move(prompt);
+            deliver_async(mailbox, std::move(result));
+        },
+        [mailbox] {
+            AsyncResult result;
+            result.kind = AsyncResultKind::authenticated;
+            deliver_async(mailbox, std::move(result));
+        });
+    const auto agent              = app_state.authentication_agent;
+    app_state.authentication_view = std::make_unique<AuthenticationView>(
+        [agent](std::uint64_t id, const std::string &response) { agent->respond(id, response); },
+        [agent](std::uint64_t id) { agent->cancel(id); });
     app_state.store        = std::make_unique<StoreViewModel>();
     app_state.catalog      = std::make_unique<CatalogViewModel>(*app_state.store);
+    app_state.runtimes     = std::make_unique<CatalogViewModel>(*app_state.store, true);
     app_state.installed    = std::make_unique<InstalledViewModel>(*app_state.store);
     app_state.detail       = std::make_unique<DetailViewModel>(*app_state.store);
     app_state.catalog_view = std::make_unique<CatalogView>(
         *app_state.catalog,
         CatalogViewCallbacks{select_app_event, catalog_quick_action_event, filter_event, refresh_event, apply_layout});
+    app_state.runtime_view = std::make_unique<CatalogView>(
+        *app_state.runtimes,
+        CatalogViewCallbacks{select_app_event, catalog_quick_action_event, nullptr, refresh_event, apply_layout});
     app_state.installed_view = std::make_unique<InstalledView>(
         *app_state.installed,
         InstalledViewCallbacks{select_app_event, installed_primary_action_event, installed_remove_event, apply_layout});
     app_state.detail_view = std::make_unique<DetailView>(
-        *app_state.detail,
-        DetailViewCallbacks{back_event, detail_primary_action_event, detail_remove_event, apply_layout});
+        *app_state.detail, DetailViewCallbacks{back_event, detail_primary_action_event, detail_remove_event,
+                                               apply_layout, runtime_version_event});
 
     app_state.surface = lv_obj_create(context->root);
     lv_obj_set_name_static(app_state.surface, "app_surface");
@@ -641,21 +835,34 @@ void app_close()
 {
     app_state.closing = true;
     if (app_state.mailbox) app_state.mailbox->accepting = false;
+    if (app_state.authentication_view) app_state.authentication_view->destroy();
+    app_state.authentication_view.reset();
+    if (app_state.authentication_agent) app_state.authentication_agent->stop();
+    app_state.authentication_agent.reset();
     lv_async_call_cancel(render_page_async, &app_state);
+    lv_async_call_cancel(close_rollback_async, &app_state);
+    app_state.rollback_close_pending = false;
+    app_state.rollback_selection.reset();
+    app_state.rollback_focus_app_id.clear();
+    app_state.rollback_focus_version.clear();
     app_state.page_render_pending = false;
     if (app_state.worker_timer) lv_timer_delete(app_state.worker_timer);
     app_state.worker_timer = nullptr;
     if (app_state.catalog_view) app_state.catalog_view->destroy();
+    if (app_state.runtime_view) app_state.runtime_view->destroy();
     if (app_state.installed_view) app_state.installed_view->destroy();
     if (app_state.detail_view) app_state.detail_view->destroy();
     app_state.catalog_view.reset();
+    app_state.runtime_view.reset();
     app_state.installed_view.reset();
     app_state.detail_view.reset();
     if (app_state.surface) lv_obj_delete(app_state.surface);
-    app_state.surface    = nullptr;
-    app_state.content    = nullptr;
-    app_state.navigation = nullptr;
+    app_state.surface         = nullptr;
+    app_state.content         = nullptr;
+    app_state.navigation      = nullptr;
+    app_state.rollback_dialog = nullptr;
     app_state.catalog.reset();
+    app_state.runtimes.reset();
     app_state.installed.reset();
     app_state.detail.reset();
     app_state.store.reset();

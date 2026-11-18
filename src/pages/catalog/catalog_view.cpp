@@ -111,6 +111,87 @@ void create_app_row(lv_obj_t *body, std::size_t index, const StoreApp &app, cons
     if (actionable) lv_obj_add_flag(badge, LV_OBJ_FLAG_CLICKABLE);
 }
 
+void create_runtime_row(lv_obj_t *body, std::size_t index, const StoreApp &app, const CatalogViewCallbacks &callbacks)
+{
+    auto *row = lv_button_create(body);
+    lv_obj_set_name(row, app.id.c_str());
+    style_box(row, COLOR_SURFACE, 12);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(row, 14, 0);
+    lv_obj_set_style_pad_row(row, 8, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+    lv_obj_add_event_cb(row, callbacks.select_app, LV_EVENT_CLICKED,
+                        reinterpret_cast<void *>(static_cast<std::uintptr_t>(index)));
+
+    auto *heading = make_flex(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_size(heading, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_column(heading, 8, 0);
+    lv_obj_set_flex_align(heading, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    auto *name = make_label(heading, app.name.c_str(), 22, COLOR_TITLE);
+    lv_obj_set_width(name, 0);
+    lv_obj_set_flex_grow(name, 1);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_WRAP);
+    const bool actionable = !app.busy && app.available && (!app.installed || app.update_available);
+    const char *action =
+        app.busy ? "Working"
+                 : (!app.catalogued
+                        ? "Unknown"
+                        : (!app.available
+                               ? "Unavailable"
+                               : (!app.installed ? "Install" : (app.update_available ? "Update" : "Up to date"))));
+    auto *button =
+        make_button(heading, action, 14, actionable ? COLOR_ACTION : COLOR_DISABLED_SURFACE,
+                    actionable ? COLOR_SURFACE : COLOR_SECONDARY, actionable ? callbacks.quick_action : nullptr,
+                    reinterpret_cast<void *>(static_cast<std::uintptr_t>(index)));
+    lv_obj_set_name_static(button, "runtime_update_action");
+    lv_obj_set_size(button, 96, 44);
+    for (const auto &text :
+         {app.package, app.installed ? "Installed: " + app.version : "Not installed",
+          !app.catalogued ? "Update information unavailable"
+                          : (app.available ? "Available: " + app.latest_version : "No compatible release")}) {
+        if (text == app.package && app.name == app.package) continue;
+        auto *label = make_label(row, text.c_str(), 14, COLOR_SECONDARY);
+        lv_obj_set_width(label, LV_PCT(100));
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    }
+    if (!app.operation_error.empty()) {
+        auto *error = make_label(row, "Update failed · View details", 14, COLOR_DANGER);
+        lv_obj_set_width(error, LV_PCT(100));
+        lv_label_set_long_mode(error, LV_LABEL_LONG_WRAP);
+    }
+}
+
+void create_runtime_heading(lv_obj_t *body, CatalogViewModel &view_model, lv_event_cb_t refresh)
+{
+    auto *heading = make_flex(body, LV_FLEX_FLOW_ROW);
+    lv_obj_set_size(heading, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_column(heading, 8, 0);
+    lv_obj_set_flex_align(heading, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    auto *title = make_label(heading, "Runtime", 28, COLOR_TITLE);
+    lv_obj_set_width(title, 0);
+    lv_obj_set_flex_grow(title, 1);
+    const bool loading = view_model.registry_state() == RegistryState::loading;
+    auto *check = make_button(heading, loading ? "Checking..." : "Check updates", 14, COLOR_ACTION, COLOR_SURFACE,
+                              loading ? nullptr : refresh);
+    lv_obj_set_name_static(check, "runtime_check_updates");
+    lv_obj_set_size(check, 120, 44);
+    auto *description = make_label(body, "Browse runtime packages and manage installed versions.", 14, COLOR_SECONDARY);
+    lv_obj_set_width(description, LV_PCT(100));
+    lv_label_set_long_mode(description, LV_LABEL_LONG_WRAP);
+    if (view_model.registry_state() == RegistryState::ready && !view_model.uncatalogued_count()) {
+        const auto count = view_model.update_count();
+        const auto text  = std::to_string(count) + (count == 1 ? " update available" : " updates available");
+        make_label(body, text.c_str(), 14, count ? COLOR_ACCENT : COLOR_SECONDARY);
+    }
+    if (view_model.uncatalogued_count()) {
+        auto *notice = make_label(body, "Some installed components have no update information in this catalog.", 14,
+                                  COLOR_SECONDARY);
+        lv_obj_set_name_static(notice, "runtime_catalog_notice");
+        lv_obj_set_width(notice, LV_PCT(100));
+        lv_label_set_long_mode(notice, LV_LABEL_LONG_WRAP);
+    }
+}
+
 void create_registry_status(lv_obj_t *body, CatalogViewModel &view_model, lv_event_cb_t refresh)
 {
     if (view_model.registry_state() == RegistryState::ready) return;
@@ -140,9 +221,12 @@ namespace {
 void build_catalog_view(lv_obj_t *content, CatalogViewModel &view_model, const CatalogViewCallbacks &callbacks)
 {
     auto *body = make_page_body(content);
+    if (view_model.runtimes()) create_runtime_heading(body, view_model, callbacks.refresh);
     create_registry_status(body, view_model, callbacks.refresh);
-    create_filter(body, view_model, callbacks.set_filter);
-    create_catalog_section_heading(body);
+    if (!view_model.runtimes()) {
+        create_filter(body, view_model, callbacks.set_filter);
+        create_catalog_section_heading(body);
+    }
 
     auto *grid = make_flex(body, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_name_static(grid, "catalog_grid");
@@ -160,7 +244,10 @@ void build_catalog_view(lv_obj_t *content, CatalogViewModel &view_model, const C
     for (std::size_t index = 0; index < view_model.apps().size(); ++index) {
         const auto &app = view_model.apps()[index];
         if (!view_model.is_visible(app)) continue;
-        create_app_row(grid, index, app, callbacks);
+        if (view_model.runtimes())
+            create_runtime_row(grid, index, app, callbacks);
+        else
+            create_app_row(grid, index, app, callbacks);
         has_visible_apps = true;
     }
 
@@ -171,7 +258,11 @@ void build_catalog_view(lv_obj_t *content, CatalogViewModel &view_model, const C
         lv_obj_set_style_pad_row(empty, 12, 0);
         lv_obj_set_flex_align(empty, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         make_label(empty, LV_SYMBOL_DOWNLOAD, 36, COLOR_SECONDARY);
-        make_label(empty, "No apps available", 22, COLOR_SECONDARY);
+        auto *text = make_label(empty, view_model.runtimes() ? "No runtime packages available" : "No apps available",
+                                22, COLOR_SECONDARY);
+        lv_obj_set_width(text, LV_PCT(100));
+        lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(text, LV_LABEL_LONG_WRAP);
     }
 }
 
@@ -186,7 +277,7 @@ lv_obj_t *CatalogView::create(lv_obj_t *parent)
 {
     destroy();
     surface_ = make_flex(parent, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_name_static(surface_, "catalog_page");
+    lv_obj_set_name_static(surface_, view_model_.runtimes() ? "runtime_page" : "catalog_page");
     lv_obj_set_size(surface_, LV_PCT(100), LV_PCT(100));
     rebuild();
     suppress_refresh_ = true;

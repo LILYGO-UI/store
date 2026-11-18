@@ -343,7 +343,8 @@ const RegistryRelease *select_release(const RegistryApplication &app, const std:
     const RegistryRelease *selected = nullptr;
     for (const auto &release : app.releases) {
         if (release.status != "published" || (release.architecture != architecture && release.architecture != "all") ||
-            (!appkit_version.empty() && debian_version_compare(release.min_appkit_version, appkit_version) > 0))
+            (!app.runtime && !appkit_version.empty() &&
+             debian_version_compare(release.min_appkit_version, appkit_version) > 0))
             continue;
         const auto comparison = selected ? debian_version_compare(release.version, selected->version) : 1;
         if (comparison > 0 ||
@@ -353,11 +354,57 @@ const RegistryRelease *select_release(const RegistryApplication &app, const std:
     return selected;
 }
 
+std::vector<RegistryRelease> runtime_releases(const RegistryApplication &app, const std::string &architecture)
+{
+    std::vector<RegistryRelease> releases;
+    for (const auto &release : app.releases) {
+        if (release.status == "published" && (release.architecture == architecture || release.architecture == "all"))
+            releases.push_back(release);
+    }
+    std::stable_sort(releases.begin(), releases.end(), [&](const auto &left, const auto &right) {
+        const auto comparison = debian_version_compare(left.version, right.version);
+        if (comparison != 0) return comparison > 0;
+        return left.architecture == architecture && right.architecture != architecture;
+    });
+    releases.erase(std::unique(releases.begin(), releases.end(),
+                               [](const auto &left, const auto &right) {
+                                   return debian_version_compare(left.version, right.version) == 0;
+                               }),
+                   releases.end());
+    return releases;
+}
+
 std::string configured_appkit_version(PackageManager &packages)
 {
     if (const auto *value = std::getenv("LILYGO_UI_APPKIT_VERSION"); value && *value) return value;
     const auto installed = packages.query("lilygo-ui-appkit-dev");
     return installed.installed ? installed.version : std::string{};
+}
+
+void append_installed_runtimes(std::vector<StoreApp> &apps, PackageManager &packages)
+{
+    for (const auto &runtime : packages.installed_runtimes()) {
+        if (std::any_of(apps.begin(), apps.end(), [&](const auto &app) { return app.package == runtime.package; }))
+            continue;
+        StoreApp app;
+        app.id      = local_id(runtime.package);
+        app.app_id  = "runtime:" + std::string(runtime.package);
+        app.package = runtime.package;
+        // These friendly labels do not control discovery. Other components use
+        // their package name until a verified Registry title is available.
+        app.name        = runtime.package == "lilygo-ui-appkit-dev" ? "AppKit"
+                          : runtime.package == "lilygo-ui-mesa-vc4" ? "Mesa VC4"
+                          : runtime.package == "meshtasticd"        ? "Meshtastic daemon"
+                                                                    : runtime.package;
+        app.summary     = runtime.summary;
+        app.description = runtime.summary;
+        app.version     = runtime.version;
+        app.runtime     = true;
+        app.installed   = true;
+        app.available   = false;
+        app.catalogued  = false;
+        apps.push_back(std::move(app));
+    }
 }
 
 }  // namespace
@@ -374,7 +421,12 @@ StoreRefreshResult StoreService::refresh(const std::string &root_url, const std:
 
 StoreRefreshResult StoreService::make_result(RegistryLoadResult loaded)
 {
-    if (!loaded) return {{}, {}, loaded.error, {}, {}};
+    if (!loaded) {
+        StoreRefreshResult result;
+        result.error = std::move(loaded.error);
+        append_installed_runtimes(result.apps, packages_);
+        return result;
+    }
     const auto architecture = packages_.architecture();
     if (architecture.empty()) return {{}, {}, "Unable to determine the device package architecture", {}, {}};
     const auto appkit_version = configured_appkit_version(packages_);
@@ -386,10 +438,13 @@ StoreRefreshResult StoreService::make_result(RegistryLoadResult loaded)
     for (const auto &registry_app : loaded.catalog.apps) {
         const auto *release  = select_release(registry_app, architecture, appkit_version);
         const auto installed = packages_.query(registry_app.package);
-        // Keep installed apps manageable even if their compatible release was withdrawn.
-        if (!release && !installed.installed) continue;
+        // Runtime is a complete catalog: retain incompatible entries for display.
+        // Ordinary apps still hide unavailable releases unless already installed.
+        if (!registry_app.runtime && !release && !installed.installed) continue;
 
         StoreApp app;
+        app.runtime = registry_app.runtime;
+        if (app.runtime) app.runtime_releases = runtime_releases(registry_app, architecture);
         app.id          = local_id(registry_app.package);
         app.app_id      = registry_app.app_id;
         app.package     = registry_app.package;
@@ -429,6 +484,7 @@ StoreRefreshResult StoreService::make_result(RegistryLoadResult loaded)
         }
         result.apps.push_back(std::move(app));
     }
+    append_installed_runtimes(result.apps, packages_);
     return result;
 }
 
@@ -454,11 +510,12 @@ StoreRefreshResult refresh_cached_store(const std::string &root_url)
     return StoreService(registry, packages).refresh(root_url);
 }
 
-PackageOperationResult install_store_package(const std::string &package, const RegistryRelease &release)
+PackageOperationResult install_store_package(const std::string &package, const RegistryRelease &release,
+                                             bool allow_downgrade)
 {
     PosixProcessRunner runner;
     CurlHttpClient http(runner);
-    return PackageManager(runner, http).install(package, release);
+    return PackageManager(runner, http).install(package, release, allow_downgrade);
 }
 
 PackageOperationResult remove_store_package(const std::string &package)

@@ -7,6 +7,45 @@ a responsive on-device interface, a Registry v1 client, and an independent
 store state model for browsing registry applications, viewing locally installed
 applications, and installing, updating, or removing packages.
 
+## Runtime packages
+
+The **Runtime** page lists every runtime entry in the published Registry catalog,
+including packages that are not installed and packages without a release for the
+current device architecture. Incompatible packages remain visible with their
+installation actions disabled. Store also merges locally installed `lilygo-*`
+components and meshtasticd, excluding Launcher itself and packages that own
+Launcher manifests or desktop entries. Local components remain visible with an
+older catalog or on a first offline launch.
+
+Use **Check updates** to refresh the catalog. An uninstalled component can be
+installed at its latest compatible version or at a selected historical version
+from its detail page. Installed components can be updated or rolled back after
+confirming the target version. Only `published` releases for the device's Debian
+architecture or `all` are selectable; yanked, revoked and incompatible releases
+cannot be installed. Versions use Debian ordering, and an architecture-specific
+artifact is preferred over `all` when both represent the same version. Installing
+an older version, including a rollback, leaves the newer-version update available.
+Runtime packages cannot be removed through Store.
+
+Installation, updates and confirmed rollbacks use the verified download and
+privileged APT installation flow, with errors and retry support. Store reads the
+installed version back and refreshes runtime and application compatibility after
+a successful operation. Components absent from the verified catalog show their
+installed version and unavailable update information, without offering an
+unverified installation or rollback target.
+
+Online version management reads the published Registry v1 `runtimes` index and
+snapshot runtime details, including each detail's SHA-256 digest. Older Store
+clients continue reading only the app catalog. Version selection uses real
+published release records and verified Debian artifacts; locally discovering an
+installed component does not itself make that package downloadable. If the
+catalog has no older compatible published release, no rollback target is
+offered or invented. Board overlays, including `lilygo-t-display-cm0-overlay`,
+are managed as runtime components using the same rules.
+
+Runtime previews: [portrait](assets/previews/store-runtime-portrait.png) ·
+[landscape](assets/previews/store-runtime-landscape.png).
+
 ## Features
 
 - Browse applications compatible with the device and filter by Official or Community source
@@ -65,6 +104,12 @@ with its required dependencies. Store reads the installed target version back
 with `dpkg-query`. Removal uses `pkexec dpkg --remove`, and the Store prevents users
 from removing the Store itself. Catalog refreshes and package operations run on
 worker threads; the LVGL thread only receives results and updates the interface.
+
+When administrator authorization is required, Store displays a system polkit
+authentication prompt with hardware and touch keyboard support and a Cancel
+action. Passwords are not saved. Applications started by an older Launcher may
+inherit `NoNewPrivs`; update and restart Launcher, then reopen Store to clear that
+restriction for the new application process.
 
 Dependencies are resolved by APT 2.2 or newer from the device's existing Debian/Raspberry Pi
 sources. They must be declared in the package's `Depends` or `Pre-Depends` fields

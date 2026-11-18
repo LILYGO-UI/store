@@ -1,6 +1,7 @@
 #include "domain/store_model.hpp"
 
 #include "app_identity.h"
+#include "domain/debian_version.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -63,17 +64,19 @@ std::size_t StoreModel::selected_index() const noexcept
 std::size_t StoreModel::installed_count() const noexcept
 {
     return static_cast<std::size_t>(
-        std::count_if(apps_.cbegin(), apps_.cend(), [](const auto &item) { return item.installed; }));
+        std::count_if(apps_.cbegin(), apps_.cend(), [](const auto &item) { return item.installed && !item.runtime; }));
 }
 
 std::size_t StoreModel::update_count() const noexcept
 {
-    return static_cast<std::size_t>(std::count_if(
-        apps_.cbegin(), apps_.cend(), [](const auto &item) { return item.installed && item.update_available; }));
+    return static_cast<std::size_t>(std::count_if(apps_.cbegin(), apps_.cend(), [](const auto &item) {
+        return item.installed && item.update_available && !item.runtime;
+    }));
 }
 
 bool StoreModel::matches_filter(const StoreApp &item) const noexcept
 {
+    if (item.runtime) return false;
     if (!item.available && !item.installed) return false;
     if (filter_ == CatalogFilter::official) return item.official;
     if (filter_ == CatalogFilter::community) return !item.official;
@@ -140,8 +143,9 @@ bool StoreModel::install(std::size_t index, std::string version)
     auto *item = app(index);
     if (!item || item->installed) return false;
     item->installed        = true;
-    item->update_available = false;
     item->version          = version.empty() ? item->latest_version : std::move(version);
+    item->update_available = item->runtime && item->available && !item->latest_version.empty() &&
+                             debian_version_compare(item->version, item->latest_version) < 0;
     item->operation_error.clear();
     item->busy = false;
     return true;
@@ -150,18 +154,19 @@ bool StoreModel::install(std::size_t index, std::string version)
 bool StoreModel::update(std::size_t index, std::string version)
 {
     auto *item = app(index);
-    if (!item || !item->installed || !item->update_available) return false;
+    if (!item || !item->installed || (!item->runtime && !item->update_available)) return false;
     item->version = version.empty() ? item->latest_version : std::move(version);
     item->operation_error.clear();
-    item->update_available = false;
-    item->busy             = false;
+    item->update_available = item->runtime && item->available && !item->latest_version.empty() &&
+                             debian_version_compare(item->version, item->latest_version) < 0;
+    item->busy = false;
     return true;
 }
 
 bool StoreModel::remove(std::size_t index) noexcept
 {
     auto *item = app(index);
-    if (!item || !item->installed) return false;
+    if (!item || !item->installed || item->runtime) return false;
     item->installed = false;
     item->operation_error.clear();
     item->update_available = false;
